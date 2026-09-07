@@ -1,3 +1,8 @@
 Flask
-gunicorn
 Flask-Cors
+gunicorn
+pyotp
+smartapi-python
+logzero
+pycryptodome
+requests
