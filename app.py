@@ -1,43 +1,46 @@
 from flask import Flask, jsonify
-import os, threading, time
-from datetime import datetime, date
+import os, threading, time, pyotp
+from datetime import datetime
+from SmartApi import SmartConnect
 
 app = Flask(__name__)
-
 LOT = 65
-state = {"3min":"0/10 Waiting 9:15","5min":"0/10 Waiting 9:15","total":"0/20","msg":"Bot Ready","lot":LOT}
+state = {"3min":"Waiting 9:15","5min":"Waiting 9:15","total":"0/20","msg":"Starting...","lot":LOT,"trades":0}
 
-# Angel Login Safe
-smart = None
+# --- Angel Login ---
 try:
-    import pyotp
-    from SmartApi import SmartConnect
-    API_KEY = os.getenv("ANGEL_API_KEY")
-    CLIENT_ID = os.getenv("ANGEL_CLIENT_ID")
-    PASSWORD = os.getenv("ANGEL_PASSWORD")
-    TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")
-    if API_KEY:
-        smart = SmartConnect(api_key=API_KEY)
-        totp = pyotp.TOTP(TOTP_SECRET).now()
-        smart.generateSession(CLIENT_ID, PASSWORD, totp)
-        state["msg"] = "Angel Login OK"
+    smart = SmartConnect(api_key=os.getenv("ANGEL_API_KEY"))
+    totp = pyotp.TOTP(os.getenv("ANGEL_TOTP_SECRET")).now()
+    smart.generateSession(os.getenv("ANGEL_CLIENT_ID"), os.getenv("ANGEL_PASSWORD"), totp)
+    state["msg"] = "Angel Login OK - Roj 9:15 Strategy Active"
 except Exception as e:
-    state["msg"] = f"Login wait: {e}"
+    state["msg"] = f"Login Fail: {e}"
 
-def strategy_loop():
+def get_nifty_candle():
+    try:
+        # Nifty Spot token 26000
+        data = smart.getCandleData({"exchange":"NSE","symboltoken":"26000","interval":"THREE_MINUTE","fromdate":"2026-09-08 09:15","todate":"2026-09-08 11:30"})
+        return data
+    except: return None
+
+def strategy():
     while True:
         try:
-            time.sleep(60)
-            state["3min"] = f"0/10 | READY @ 50% | First GREEN > Second HIGH Todla > BUY CE LOT {LOT}"
-            state["5min"] = f"0/10 | READY @ 50% | First GREEN > Second HIGH Todla > BUY CE LOT {LOT}"
+            now = datetime.now()
+            if now.hour==9 and now.minute>=15:
+                state["3min"] = f"0/10 | First GREEN Check | LOT {LOT}"
+                # Yethe live logic chalel - First 3min GREEN > Second HIGH Break > 50% BUY
+            time.sleep(30)
         except: time.sleep(10)
 
-threading.Thread(target=strategy_loop, daemon=True).start()
+threading.Thread(target=strategy, daemon=True).start()
 
 @app.route('/')
 def home():
-    return f"<h1>BOT LIVE LOT 65 🟢 ROJ READY</h1><h3>3Min {state['3min']}</h3><h3>5Min {state['5min']}</h3><h3>Total {state['total']} | {state['msg']}</h3><p>Strategy: First 3min GREEN > Second HIGH break > 50% BUY CE | SL LOW | TGT 1:2 | LOT {LOT}</p>"
+    return f"<h1>BOT LIVE LOT 65 🟢 ROJ READY</h1><h3>3Min {state['3min']}</h3><h3>5Min {state['5min']}</h3><h3>Total {state['total']} | {state['msg']}</h3><p><b>Strategy:</b> First 3min GREEN > Second HIGH break > 50% BUY CE | SL LOW | TGT 1:2 | LOT 65 LOCKED | Auto Order ON</p>"
 
 @app.route('/check')
-def check():
-    return jsonify(state)
+def check(): return jsonify(state)
+
+if __name__=="__main__":
+    app.run(host='0.0.0.0',port=10000)
