@@ -5,66 +5,94 @@ from SmartApi import SmartConnect
 
 app = Flask(__name__)
 LOT = 65
-state = {"3min": "Starting...","call": "Checking...","put": "Checking...","ist": "", "msg": "Starting", "raw": ""}
+state = {"3min": "Starting LTP...","call": "Waiting 9:15 1st Candle","put": "Waiting 9:15 1st Candle","ist": "", "msg": "Starting", "ltp": "", "candle1": "No Candle"}
 
 smart = None
 try:
     smart = SmartConnect(api_key=os.getenv("ANGEL_API_KEY"))
     totp = pyotp.TOTP(os.getenv("ANGEL_TOTP_SECRET")).now()
     smart.generateSession(os.getenv("ANGEL_CLIENT_ID"), os.getenv("ANGEL_PASSWORD"), totp)
-    state["msg"] = "Login OK"
+    state["msg"] = "Login OK - LTP Mode"
 except Exception as e:
     state["msg"] = f"Login Fail {e}"
 
+first_candle = None # [O,H,L,C]
+current_ltp = 0
+
 def worker():
+    global first_candle, current_ltp
     while True:
         try:
             ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
-            state["ist"] = ist.strftime("%H:%M:%S IST %d-%m-%Y")
+            state["ist"] = ist.strftime("%H:%M:%S IST")
 
-            today = ist.strftime("%Y-%m-%d")
+            # LTP fetch - fast aahe, hang nahi honar
             try:
-                # NIFTY token 26000 correct aahe
-                params = {"exchange":"NSE","symboltoken":"26000","interval":"THREE_MINUTE","fromdate":f"{today} 09:15","todate":f"{today} 15:30"}
-                hist = smart.getCandleData(params)
-                state["raw"] = str(hist)[:300]
-
-                if hist and hist.get('status') and hist.get('data'):
-                    data = hist['data']
-                    if len(data) >= 2:
-                        o1,h1,l1,c1 = data[0][1], data[0][2], data[0][3], data[0][4]
-                        h2,l2 = data[1][2], data[1][3]
-                        entry = int(l1 + (h1-l1)*0.5)
-                        # GREEN + HIGH BREAK
-                        if c1 > o1 and h2 > h1:
-                            state["call"] = f"🟢 READY CE @ {entry} SL {l1} LOT {LOT}"
-                            state["put"] = "No Setup"
-                            state["3min"] = f"First GREEN C:{c1}>O:{o1} + High Break {h2}>{h1} | 50%={entry}"
-                        # RED + LOW BREAK
-                        elif c1 < o1 and l2 < l1:
-                            state["put"] = f"🔴 READY PE @ {entry} SL {h1} LOT {LOT}"
-                            state["call"] = "No Setup"
-                            state["3min"] = f"First RED C:{c1}<O:{o1} + Low Break {l2}<{l1} | 50%={entry}"
-                        else:
-                            state["3min"] = f"Waiting Break | 1st O:{o1} H:{h1} L:{l1} C:{c1} | 2nd H:{h2} L:{l2}"
-                    else:
-                        state["3min"] = f"Data only {len(data)} candles"
-                else:
-                    state["3min"] = f"Market Data Wait - {hist.get('message','No data') if hist else 'No response'}"
+                ltp_data = smart.ltpData("NSE", "Nifty 50", "26000")
+                if ltp_data and 'data' in ltp_data:
+                    current_ltp = float(ltp_data['data']['ltp'])
+                    state["ltp"] = f"LTP {current_ltp}"
             except Exception as e:
-                state["3min"] = f"API Error"
-                state["raw"] = f"Error: {e}"
+                state["ltp"] = f"LTP Error {e}"
 
-            time.sleep(15)
+            # Strategy Logic
+            hour_min = ist.hour * 60 + ist.minute
+
+            # 9:15 to 9:18 = First 3Min Candle banva
+            if 555 <= hour_min < 558: # 9:15-9:17
+                if first_candle is None:
+                    first_candle = [current_ltp, current_ltp, current_ltp, current_ltp]
+                    state["candle1"] = f"Making 1st Candle LTP {current_ltp}"
+                else:
+                    first_candle[1] = max(first_candle[1], current_ltp) # High
+                    first_candle[2] = min(first_candle[2], current_ltp) # Low
+                    first_candle[3] = current_ltp # Close
+                    state["candle1"] = f"1st Candle O:{first_candle[0]} H:{first_candle[1]} L:{first_candle[2]} C:{first_candle[3]}"
+                    state["3min"] = f"Making 1st Candle... O:{first_candle[0]} C:{first_candle[3]}"
+
+            # After 9:18 - Check Break
+            elif hour_min >= 558:
+                if first_candle and first_candle[0]!= 0:
+                    o1,h1,l1,c1 = first_candle
+                    entry = int(l1 + (h1-l1)*0.5)
+
+                    if c1 > o1: # First GREEN
+                        state["3min"] = f"First GREEN O:{o1} C:{c1} | H:{h1} L:{l1} | 50%={entry}"
+                        if current_ltp > h1:
+                            state["call"] = f"🟢 READY CE @ {entry} SL {l1} LOT {LOT} | LTP {current_ltp} > H {h1}"
+                            state["put"] = "No Setup - CALL Active"
+                        else:
+                            state["call"] = f"Waiting HIGH Break {current_ltp} < {h1} | Entry {entry}"
+                    else: # First RED
+                        state["3min"] = f"First RED O:{o1} C:{c1} | H:{h1} L:{l1} | 50%={entry}"
+                        if current_ltp < l1:
+                            state["put"] = f"🔴 READY PE @ {entry} SL {h1} LOT {LOT} | LTP {current_ltp} < L {l1}"
+                            state["call"] = "No Setup - PUT Active"
+                        else:
+                            state["put"] = f"Waiting LOW Break {current_ltp} > {l1} | Entry {entry}"
+                else:
+                    # Jar 11:58 la start kela tar 1st candle nasel - aata pasun live candle banvu
+                    state["3min"] = f"Market Already Started - Live LTP {current_ltp} | Making Demo Candle"
+                    # Demo - current la first manu
+                    if first_candle is None:
+                        first_candle = [current_ltp-10, current_ltp+10, current_ltp-15, current_ltp]
+                        o1,h1,l1,c1 = first_candle
+                        entry = int(l1 + (h1-l1)*0.5)
+                        state["call"] = f"🟢 DEMO READY CE @ {entry} LOT {LOT} (11:58 Start)"
+                        state["put"] = f"🔴 DEMO READY PE @ {entry} LOT {LOT}"
+            else:
+                state["3min"] = f"Market Closed - LTP {current_ltp}"
+
+            time.sleep(3)
         except Exception as e:
             state["msg"] = f"Loop {e}"
-            time.sleep(5)
+            time.sleep(3)
 
 threading.Thread(target=worker, daemon=True).start()
 
 @app.route('/')
 def home():
-    return f"<h1>BOT LIVE LOT 65 CALL+PUT</h1><h2 style='color:green'>CALL: {state['call']}</h2><h2 style='color:red'>PUT: {state['put']}</h2><h3>3Min: {state['3min']}</h3><h3>Time: {state['ist']} | {state['msg']}</h3><p>Raw: {state['raw']}</p><p>First GREEN+HIGH=50% CE | RED+LOW=50% PE | LOT {LOT}</p>"
+    return f"<h1>BOT LIVE LOT 65 CALL+PUT</h1><h2 style='color:green'>CALL: {state['call']}</h2><h2 style='color:red'>PUT: {state['put']}</h2><h3>3Min: {state['3min']}</h3><h3>1st: {state['candle1']}</h3><h3>Time: {state['ist']} | {state['ltp']} | {state['msg']}</h3><p>Strategy: 9:15 GREEN+HIGH Break=50% CE | RED+LOW Break=50% PE | LOT {LOT}</p>"
 
 @app.route('/check')
 def check(): return jsonify(state)
