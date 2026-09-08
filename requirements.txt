@@ -1,2 +1,5 @@
-Flask
-gunicorn
+Flask==2.3.3
+smartapi-python
+pyotp
+requests
+pytz
