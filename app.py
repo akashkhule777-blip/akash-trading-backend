@@ -5,16 +5,15 @@ from SmartApi import SmartConnect
 
 app = Flask(__name__)
 
-# ==== CONFIG - Render madhe ENV taknar ====
-API_KEY = os.getenv("API_KEY")
-CLIENT_ID = os.getenv("CLIENT_ID")
-PASSWORD = os.getenv("PASSWORD")
-TOTP_SECRET = os.getenv("TOTP_SECRET")
+API_KEY = os.getenv("ANGEL_API_KEY")
+CLIENT_ID = os.getenv("ANGEL_CLIENT_ID")
+PASSWORD = os.getenv("ANGEL_PASSWORD")
+TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")
 
 state = {
-    "3min": {"setup_ready": False, "first": None, "entry": 0, "sl": 0, "tgt": 0, "status": "Waiting 9:15", "trades": "0/10"},
-    "5min": {"setup_ready": False, "first": None, "entry": 0, "sl": 0, "tgt": 0, "status": "Waiting 9:15", "trades": "0/10"},
-    "ltp": 0, "msg": "Bot Started", "total": "0/20"
+    "3min": {"ready": False, "entry": 0, "sl": 0, "tgt": 0, "trades": "0/10", "status": "Waiting"},
+    "5min": {"ready": False, "entry": 0, "sl": 0, "tgt": 0, "trades": "0/10", "status": "Waiting"},
+    "msg": "Starting...", "total": "0/20", "lot": 65
 }
 
 smart = None
@@ -24,50 +23,33 @@ def angel_login():
         smart = SmartConnect(api_key=API_KEY)
         totp = pyotp.TOTP(TOTP_SECRET).now()
         data = smart.generateSession(CLIENT_ID, PASSWORD, totp)
-        state["msg"] = "Angel Login Success ✅"
+        state["msg"] = f"LOGIN SUCCESS ✅ {CLIENT_ID}"
         return True
     except Exception as e:
         state["msg"] = f"Login Fail: {e}"
         return False
 
-def calc_levels(candle):
-    entry = candle['low'] + (candle['high'] - candle['low']) * 0.5
-    sl = candle['low']
-    risk = entry - sl
-    target = entry + risk * 2
-    return round(entry,2), round(sl,2), round(target,2)
-
-# ==== YA FUNCTION MADHE TUZA NIFTY CANDLE LOGIC YEL ====
 def trading_loop():
+    angel_login()
     while True:
         try:
-            if not smart:
-                angel_login()
-                time.sleep(10)
-                continue
-            
             now = datetime.now()
-            # TODO: Yethe Nifty cha 3min/5min candle data SmartAPI ne ghyaycha
-            # smart.getCandleData(...)
-            # Sample:
-            # if now.hour==9 and now.minute==18: first_3min = {...}
-            # if green and second close > first high -> state["3min"]["setup_ready"]=True
-            
-            state["msg"] = f"Live Checking {now.strftime('%H:%M:%S')} | Nifty LTP: {state['ltp']}"
+            # Yethe tuzi strategy yeil:
+            # 1st 3min green? 2nd close > 1st high? 50% retracement? CE BUY
+            state["msg"] = f"Bot Running... {now.strftime('%H:%M:%S')} | Lot 65 Locked"
             time.sleep(5)
         except Exception as e:
-            state["msg"] = f"Error {e}"
+            state["msg"] = f"Error: {e}"
             time.sleep(5)
 
 @app.route('/')
 def home():
     return f"""
-    <h2>NIFTY OPTION BOT LIVE 🟢</h2>
-    <b>3Min:</b> {state['3min']['trades']} | {state['3min']['status']} | Entry:{state['3min']['entry']} SL:{state['3min']['sl']} TGT:{state['3min']['tgt']}<br>
-    <b>5Min:</b> {state['5min']['trades']} | {state['5min']['status']} | Entry:{state['5min']['entry']} SL:{state['5min']['sl']} TGT:{state['5min']['tgt']}<br>
-    <b>Total:</b> {state['total']} | LOT: 75<br>
-    <b>{state['msg']}</b><hr>
-    Logic: First GREEN > Second Close > First High > 50% pe CE BUY
+    <h1>BOT LIVE 🟢 LOT 65</h1>
+    <p>3Min: {state['3min']['trades']} | Entry:{state['3min']['entry']} SL:{state['3min']['sl']} TGT:{state['3min']['tgt']} | {state['3min']['status']}</p>
+    <p>5Min: {state['5min']['trades']} | Entry:{state['5min']['entry']} SL:{state['5min']['sl']} TGT:{state['5min']['tgt']} | {state['5min']['status']}</p>
+    <p>Total: {state['total']} | {state['msg']}</p>
+    <hr>Setup: 1st GREEN, 2nd Close > 1st HIGH, 3rd pasun 50% la BUY CE | SL=1st LOW | TGT 1:2
     """
 
 @app.route('/check')
