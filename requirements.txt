@@ -1,5 +1,1 @@
-Flask==2.3.3
-smartapi-python
-pyotp
-pycryptodome
-requests
+Flask
