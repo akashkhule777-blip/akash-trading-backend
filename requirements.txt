@@ -1,6 +1,5 @@
 Flask==2.3.3
-smartapi-python==1.3.9
+smartapi-python
 pyotp
 pycryptodome
 requests
-logzero
