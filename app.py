@@ -12,13 +12,14 @@ state = {
     "c3": "Wait OB", "c5": "Wait OB",
     "call3": "Scanning Uptrend OB...", "put3": "Scanning Uptrend OB...",
     "call5": "Scanning Uptrend OB...", "put5": "Scanning Uptrend OB...",
-    "atm": "Wait", "cnt3":0, "cnt5":0, "msg":"1:2 Final"
+    "atm": "Wait", "cnt3":0, "cnt5":0, "msg":"1:2 Final + NIFTY 0 Fix"
 }
 
 smart=None
 try:
     smart=SmartConnect(api_key=os.getenv("ANGEL_API_KEY"))
     smart.generateSession(os.getenv("ANGEL_CLIENT_ID"), os.getenv("ANGEL_PASSWORD"), pyotp.TOTP(os.getenv("ANGEL_TOTP_SECRET")).now())
+    state["msg"]="Login OK - Ready for 9:15"
 except Exception as e:
     state["msg"]=f"Login {e}"
 
@@ -27,19 +28,25 @@ def get_spot():
         if smart:
             d=smart.ltpData("NSE","Nifty 50","99926000")
             v=float(d['data']['ltp'])
-            if v>1000: return v
+            if v>1000:
+                return v
+            # Market band asel tar last value thev
+            if state["ltp"]>0:
+                return state["ltp"]
     except: pass
     try:
         sess=requests.Session()
         sess.headers.update({"User-Agent":"Mozilla/5.0"})
         sess.get("https://www.nseindia.com",timeout=5)
         r=sess.get("https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY",timeout=8)
-        if r.status_code==200: return float(r.json()['records']['underlyingValue'])
+        if r.status_code==200:
+            return float(r.json()['records']['underlyingValue'])
     except: pass
-    return 0
+    return state["ltp"] if state["ltp"]>0 else 0
 
 def get_atm(spot):
     try:
+        if spot==0: return 0,0,0
         strike=int(round(spot/50)*50)
         sess=requests.Session()
         sess.headers.update({"User-Agent":"Mozilla/5.0"})
@@ -74,16 +81,17 @@ def worker():
             ist=datetime.utcnow()+timedelta(hours=5,minutes=30)
             state["ist"]=ist.strftime("%H:%M:%S IST")
             spot=get_spot()
-            state["ltp"]=spot
+            if spot>0:
+                state["ltp"]=spot
             if spot==0:
-                time.sleep(2)
+                time.sleep(5)
                 continue
             ce_ltp,pe_ltp,_=get_atm(spot)
             if ce_ltp>0: ce_q.append(ce_ltp)
             if pe_ltp>0: pe_q.append(pe_ltp)
 
             mod=ist.hour*60+ist.minute
-            # 3MIN CANDLE
+            # 3MIN
             s3=(mod//3)*3
             if live3 is None or live3[4]!=s3:
                 if live3 is not None:
@@ -95,17 +103,17 @@ def worker():
                         sec=live3
                         if sec[1]>first3[1] or sec[3]>first3[1]:
                             b3up=True; b3dn=False; phase3=2
-                            state["call3"]=f"BREAK UP {sec[1]} > {first3[1]} | 3rd pasun 50% wait + Uptrend"
+                            state["call3"]=f"BREAK UP {sec[1]}>{first3[1]} | 3rd pasun 50% wait + Uptrend"
                         elif sec[2]<first3[2] or sec[3]<first3[2]:
                             b3dn=True; b3up=False; phase3=2
-                            state["put3"]=f"BREAK DN {sec[2]} < {first3[2]} | 3rd pasun 50% wait + Uptrend"
+                            state["put3"]=f"BREAK DN {sec[2]}<{first3[2]} | 3rd pasun 50% wait + Uptrend"
                         else:
                             first3=sec
                 live3=[spot,spot,spot,spot,s3]
             else:
                 live3[1]=max(live3[1],spot); live3[2]=min(live3[2],spot); live3[3]=spot
 
-            # 5MIN CANDLE
+            # 5MIN
             s5=(mod//5)*5
             if live5 is None or live5[4]!=s5:
                 if live5 is not None:
@@ -125,7 +133,6 @@ def worker():
             else:
                 live5[1]=max(live5[1],spot); live5[2]=min(live5[2],spot); live5[3]=spot
 
-            # UPTREND FILTER + 50% ENTRY
             ema3=ema(list(spot3_q),20); ema5=ema(list(spot5_q),20)
             ce_ema=ema(list(ce_q),20); pe_ema=ema(list(pe_q),20)
 
