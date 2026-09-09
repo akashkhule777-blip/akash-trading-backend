@@ -2,7 +2,6 @@ from flask import Flask, jsonify
 import os, threading, time, pyotp, requests
 from datetime import datetime, timedelta
 from SmartApi import SmartConnect
-from collections import deque
 
 app = Flask(__name__)
 LOT=65
@@ -29,7 +28,7 @@ def angel_login():
         data=s.generateSession(client_id, pwd, totp)
         jwt_token=data['data']['jwtToken']
         smart=s
-        add_log(f"LOGIN OK {jwt_token[:15]}")
+        add_log(f"LOGIN OK")
         state["msg"]="Login OK"
         return True
     except Exception as e:
@@ -42,43 +41,54 @@ def get_spot():
     ist=datetime.utcnow()+timedelta(hours=5,minutes=30)
     state["ist"]=ist.strftime("%H:%M:%S IST")
 
-    # METHOD 1: Direct getLtpData via HTTP (same as login)
+    # 1. GOOGLE FINANCE via AllOrigins - FIRST TRY
     try:
+        add_log("TRY GOOGLE")
+        r=requests.get("https://api.allorigins.win/raw?url=https://www.google.com/finance/quote/NIFTY:INDEXNSE",headers={"User-Agent":"Mozilla/5.0"},timeout=4)
+        add_log(f"GOOGLE status {r.status_code} len {len(r.text)}")
+        if r.status_code==200:
+            import re
+            m=re.search(r'YMlKec fxKbKc">([^<]+)',r.text)
+            if m:
+                txt=m.group(1).replace('₹','').replace(',','').strip()
+                v=float(txt)
+                if v>1000:
+                    add_log(f"GOOGLE OK {v}")
+                    return v
+    except Exception as e:
+        add_log(f"GOOGLE ERR {e}")
+
+    # 2. CODETABS Yahoo proxy
+    try:
+        add_log("TRY CODETABS")
+        r=requests.get("https://api.codetabs.com/v1/proxy?quest=https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI",timeout=4)
+        add_log(f"CODETABS {r.status_code}")
+        if r.status_code==200:
+            js=r.json()
+            v=float(js['chart']['result'][0]['meta']['regularMarketPrice'])
+            if v>1000:
+                add_log(f"CODETABS OK {v}")
+                return v
+    except Exception as e:
+        add_log(f"CODETABS ERR {e}")
+
+    # 3. Angel HTTP last
+    try:
+        add_log("TRY ANGEL HTTP")
         if jwt_token:
             url="https://apiconnect.angelone.in/rest/secure/angelbroking/order/v1/getLtpData"
-            headers={
-                "Authorization": f"Bearer {jwt_token}",
-                "Content-Type":"application/json",
-                "Accept":"application/json",
-                "X-UserType":"USER",
-                "X-SourceID":"WEB",
-                "X-ClientLocalIP":"127.0.0.1",
-                "X-ClientPublicIP":"127.0.0.1",
-                "X-MACAddress":"00:00:00:00:00:00",
-                "X-PrivateKey": api_key
-            }
+            headers={"Authorization":f"Bearer {jwt_token}","Content-Type":"application/json","X-PrivateKey":api_key,"X-UserType":"USER","X-SourceID":"WEB","X-ClientLocalIP":"127.0.0.1","X-ClientPublicIP":"127.0.0.1","X-MACAddress":"00:00:00:00:00:00"}
             body={"exchange":"NSE","tradingsymbol":"Nifty 50","symboltoken":"99926000"}
-            r=requests.post(url,headers=headers,json=body,timeout=5)
-            add_log(f"LTP HTTP {r.status_code} {r.text[:250]}")
+            r=requests.post(url,headers=headers,json=body,timeout=4)
+            add_log(f"ANGEL {r.status_code} {r.text[:150]}")
             if r.status_code==200:
                 js=r.json()
                 if js.get('data') and js['data'].get('ltp'):
                     v=float(js['data']['ltp'])
                     if v>1000:
-                        add_log(f"SUCCESS {v}")
                         return v
     except Exception as e:
-        add_log(f"LTP HTTP ERR {e}")
-
-    # METHOD 2: SDK fallback
-    try:
-        if smart:
-            d=smart.ltpData("NSE","Nifty 50","99926000")
-            add_log(f"SDK {str(d)[:200]}")
-            if d and d.get('data') and d['data'].get('ltp'):
-                return float(d['data']['ltp'])
-    except Exception as e:
-        add_log(f"SDK ERR {e}")
+        add_log(f"ANGEL ERR {e}")
 
     return 0
 
@@ -114,10 +124,8 @@ def worker():
                 fails+=1
                 add_log(f"SPOT 0 fail {fails}")
                 if fails>3:
-                    angel_login()
-                    fails=0
-                time.sleep(2); continue
-
+                    angel_login(); fails=0
+                time.sleep(3); continue
             mod=datetime.utcnow()+timedelta(hours=5,minutes=30)
             mod=mod.hour*60+mod.minute
             s3=(mod//3)*3
@@ -129,15 +137,14 @@ def worker():
                     elif phase3==1:
                         sec=live3
                         if sec[1]>first3[1]:
-                            b3up=True; b3dn=False; phase3=2; state["call3"]=f"BREAK UP {sec[1]:.0f}>{first3[1]:.0f} 50% wait"
+                            b3up=True; b3dn=False; phase3=2; state["call3"]=f"BREAK UP {sec[1]:.0f}>{first3[1]:.0f}"
                         elif sec[2]<first3[2]:
-                            b3dn=True; b3up=False; phase3=2; state["put3"]=f"BREAK DN {sec[2]:.0f}<{first3[2]:.0f} 50% wait"
+                            b3dn=True; b3up=False; phase3=2; state["put3"]=f"BREAK DN {sec[2]:.0f}<{first3[2]:.0f}"
                         else:
                             first3=sec
                 live3=[spot,spot,spot,spot,s3]
             else:
                 live3[1]=max(live3[1],spot); live3[2]=min(live3[2],spot); live3[3]=spot
-
             if phase3==2 and first3:
                 fifty=int(first3[2]+(first3[1]-first3[2])*0.5)
                 if abs(spot-fifty)<=15:
@@ -145,12 +152,12 @@ def worker():
                     if b3up:
                         state["cnt3"]+=1
                         oid=place_order(strike,"CE")
-                        state["call3"]=f"#{state['cnt3']} CALL BOUGHT {strike}CE 50%={fifty} ID:{oid}"
+                        state["call3"]=f"#{state['cnt3']} CALL {strike}CE 50%={fifty} ID:{oid}"
                         phase3=0; first3=None; b3up=False; b3dn=False
                     elif b3dn:
                         state["cnt3"]+=1
                         oid=place_order(strike,"PE")
-                        state["put3"]=f"#{state['cnt3']} PUT BOUGHT {strike}PE 50%={fifty} ID:{oid}"
+                        state["put3"]=f"#{state['cnt3']} PUT {strike}PE 50%={fifty} ID:{oid}"
                         phase3=0; first3=None; b3up=False; b3dn=False
             time.sleep(1)
         except Exception as e:
@@ -161,7 +168,7 @@ threading.Thread(target=worker,daemon=True).start()
 @app.route('/')
 def home():
     logs="<br>".join(state["log"][-15:])
-    return f"<h1 style='background:green;color:white;padding:8px'>AUTO ORDER ON - LTP HTTP</h1><h2>NIFTY {state['ltp']} | {state['ist']}</h2><h3>{state['c3']} Cnt {state['cnt3']}</h3><h2 style='color:green'>{state['call3']}</h2><h2 style='color:red'>{state['put3']}</h2><h4>{state['msg']}</h4><div style='background:black;color:lime;padding:10px;font-size:13px'>{logs}</div>"
+    return f"<h1 style='background:green;color:white;padding:8px'>AUTO ORDER ON - PUBLIC FIRST</h1><h2>NIFTY {state['ltp']} | {state['ist']}</h2><h3>{state['c3']} Cnt {state['cnt3']}</h3><h2 style='color:green'>{state['call3']}</h2><h2 style='color:red'>{state['put3']}</h2><h4>{state['msg']}</h4><div style='background:black;color:lime;padding:10px;font-size:12px'>{logs}</div>"
 @app.route('/check')
 def check(): return jsonify(state)
 if __name__=="__main__":
