@@ -1,28 +1,22 @@
-def get_atm_ce(obj, nifty):
+# ... varcha sagla same, fakt get_atm_ce ha navin tak
+
+def get_atm_ce(obj, nifty_price):
+    strike = int(round(nifty_price/50)*50)
     try:
-        strike = round(nifty/50)*50
-        res = obj.searchScrip("NFO", f"NIFTY {strike} CE")
-        if not res or 'data' not in res or not res['data']:
-            return None, None, 0, strike
-        # data list asel tarach ghe
-        first = res['data'][0]
-        if isinstance(first, dict):
-            sym = first.get('symbol'); tok = first.get('symboltoken')
+        for q in [f"NIFTY {strike} CE", f"NIFTY", f"{strike}CE"]:
             try:
-                ltp = float(obj.ltpData("NFO", sym, tok)['data']['ltp'])
-            except:
-                ltp = 100 # market band sathi dummy
-            return sym, tok, ltp, strike
+                res = obj.searchScrip("NFO", q)
+                if res and res.get('data'):
+                    for it in res['data']:
+                        ts = it.get('tradingsymbol','')
+                        if 'CE' in ts and str(strike) in ts and 'NIFTY' in ts:
+                            try:
+                                sym = it['tradingsymbol']; tok = it['symboltoken']
+                                ltp = float(obj.ltpData("NFO", sym, tok)['data']['ltp'])
+                                if ltp>2:
+                                    return sym, tok, ltp, strike
+                            except: continue
+            except: continue
         return None, None, 0, strike
-    except Exception as e:
-        print(f"CE Fetch Fail {e}")
-        return None, None, 0, round(nifty/50)*50
-
-# --- ENTRY Logic madhe he add kar ---
-# if ke adhi check tak
-        status_text = f"Waiting 50% {OB['fifty']:.1f}"
-
-        if ce_sym is None:
-            status_text = f"Market Closed - ATM Token Nahi (OB Active {OB['fifty']:.1f}) - Real BUY Market Hours Madhech Hoil"
-        elif OB["active"] and not POS["active"] and abs(nifty - OB["fifty"]) < 6 and OB["fifty"]!=0:
-            #... tujha BUY code
+    except:
+        return None, None, 0, strike
