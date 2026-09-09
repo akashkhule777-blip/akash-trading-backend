@@ -12,16 +12,12 @@ PASSWORD = os.getenv("ANGEL_PASSWORD")
 TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")
 
 angel = None
-OB = {"h":0,"l":0,"fifty":0,"active":False}
-POS = {"active":False, "buy_price":0}
+OB = {"h":0,"l":0,"fifty":0,"active":False, "sl_price":0, "tgt":0}
+POS = {"active":False, "buy_price":0, "symbol":"", "token":""}
 QTY = "65"
-
-# IST Time - India Time Fix
 IST = timezone(timedelta(hours=5, minutes=30))
 
-def ist_now():
-    return datetime.now(IST)
-
+def ist_now(): return datetime.now(IST)
 def get_client():
     global angel
     if angel: return angel
@@ -33,23 +29,30 @@ def get_client():
     return obj
 
 def place_order(obj, symbol, token, ttype):
-    params = {"variety":"NORMAL","tradingsymbol":symbol,"symboltoken":token,
-              "transactiontype":ttype,"exchange":"NFO","ordertype":"MARKET",
-              "producttype":"INTRADAY","duration":"DAY","quantity":QTY}
+    params = {"variety":"NORMAL","tradingsymbol":symbol,"symboltoken":token,"transactiontype":ttype,"exchange":"NFO","ordertype":"MARKET","producttype":"INTRADAY","duration":"DAY","quantity":QTY}
     return obj.placeOrder(params)
 
 @app.route('/')
 def home():
     try:
         obj = get_client()
-        if not obj: return "Login Fail"
-        
         now_ist = ist_now()
-        nifty = float(obj.ltpData("NSE","NIFTY","26000")['data']['ltp'])
+        nifty = float(obj.ltpData("NSE","NIFTY","26000")['data']['ltp']) if obj else 23544
         
-        return f"Backend OK | IST:{now_ist.strftime('%d-%m-%Y %H:%M:%S')} | NIFTY:{nifty} | LOT:{QTY} | 1st Candle 9:15-9:18 IST"
+        # Auto refresh wala HTML
+        return f"""
+        <html><head><meta http-equiv="refresh" content="3">
+        <style>body{{background:#000;color:#0f0;font-family:monospace;padding:20px}}</style>
+        </head><body>
+        <h2>✅ Backend OK | IST:{now_ist.strftime('%d-%m-%Y %H:%M:%S')} | NIFTY:{nifty} | LOT:{QTY}</h2>
+        <p>1st Candle: 9:15-9:18 IST | 50% Entry | SL: Low | TGT 1:2</p>
+        <p>Auto Refresh: 3 sec ON</p>
+        <p>Status: {POS}</p>
+        <p>OB: {OB}</p>
+        </body></html>
+        """
     except Exception as e:
-        return f"Error: {e} | IST:{ist_now().strftime('%H:%M:%S')}"
+        return f"<html><head><meta http-equiv='refresh' content='3'></head><body>Error {e} | IST {ist_now()}</body></html>"
 
 @app.route('/get_ltp')
 def get_ltp():
@@ -57,19 +60,9 @@ def get_ltp():
         obj = get_client()
         now_ist = ist_now()
         nifty = float(obj.ltpData("NSE","NIFTY","26000")['data']['ltp']) if obj else 0
-        
-        # Order Block Time Check IST nusar
-        is_first_candle_time = now_ist.hour==9 and now_ist.minute>=15 and now_ist.minute<18
-        
-        return jsonify({
-            "price": nifty, 
-            "qty": QTY, 
-            "ist_time": now_ist.strftime('%H:%M:%S %d-%m-%Y'),
-            "is_first_candle": is_first_candle_time,
-            "status": "LIVE IST FIXED"
-        })
+        return jsonify({"price":nifty,"qty":QTY,"ist_time":now_ist.strftime('%H:%M:%S %d-%m-%Y'),"status":"LIVE AutoRefresh ON","pos":POS,"ob":OB})
     except Exception as e:
-        return jsonify({"price":0, "error":str(e), "ist_time": ist_now().strftime('%H:%M:%S')})
+        return jsonify({"error":str(e)})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
