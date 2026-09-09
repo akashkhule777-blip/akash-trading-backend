@@ -1,3 +1,6 @@
 flask
 flask-cors
 gunicorn
+smartapi-python
+pyotp
+requests
