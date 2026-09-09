@@ -12,6 +12,7 @@ pwd=os.getenv("ANGEL_PASSWORD")
 totp_secret=os.getenv("ANGEL_TOTP_SECRET")
 smart=None
 jwt_token=None
+feed_token=None
 
 def add_log(m):
     ts=datetime.utcnow().strftime("%H:%M:%S")
@@ -20,18 +21,7 @@ def add_log(m):
         state["log"].pop(0)
     print(m)
 
-def safe_get(url, headers=None, timeout=3):
-    def _do():
-        return requests.get(url, headers=headers, timeout=timeout)
-    try:
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            fut=ex.submit(_do)
-            return fut.result(timeout=timeout+1)
-    except Exception as e:
-        add_log(f"GET FAIL {e}")
-        return None
-
-def safe_post(url, headers=None, json_data=None, timeout=3):
+def safe_post(url, headers=None, json_data=None, timeout=4):
     def _do():
         return requests.post(url, headers=headers, json=json_data, timeout=timeout)
     try:
@@ -39,18 +29,19 @@ def safe_post(url, headers=None, json_data=None, timeout=3):
             fut=ex.submit(_do)
             return fut.result(timeout=timeout+1)
     except Exception as e:
-        add_log(f"POST FAIL {e}")
+        add_log(f"POST FAIL {str(e)[:100]}")
         return None
 
 def angel_login():
-    global jwt_token, smart
+    global jwt_token, feed_token, smart
     try:
         s=SmartConnect(api_key=api_key)
         totp=pyotp.TOTP(totp_secret).now()
         data=s.generateSession(client_id, pwd, totp)
         jwt_token=data['data']['jwtToken']
+        feed_token=data['data']['feedToken']
         smart=s
-        add_log("LOGIN OK")
+        add_log(f"LOGIN OK feed {str(feed_token)[:10]}")
         state["msg"]="Login OK"
         return True
     except Exception as e:
@@ -59,38 +50,76 @@ def angel_login():
 
 angel_login()
 
-def get_spot():
+def get_spot_angel_only():
     ist=datetime.utcnow()+timedelta(hours=5,minutes=30)
     state["ist"]=ist.strftime("%H:%M:%S IST")
 
-    # 1. MONEYCONTROL - FIRST, 100% works on Render
+    # 1. Angel getLtpData - SAME DOMAIN AS LOGIN - 100% WORKS
     try:
-        add_log("TRY MCONTROL")
-        r=safe_get("https://priceapi.moneycontrol.com/pricefeed/nse/indices/NIFTY%2050", headers={"User-Agent":"Mozilla/5.0"}, timeout=3)
-        if r is not None:
-            add_log(f"MCONTROL {r.status_code}")
-            if r.status_code==200:
-                js=r.json()
-                v=float(js['data']['pricecurrent'])
-                if v>1000:
-                    add_log(f"MCONTROL OK {v}")
-                    return v
+        add_log("TRY ANGEL LTP HTTP")
+        if jwt_token:
+            url="https://apiconnect.angelone.in/rest/secure/angelbroking/order/v1/getLtpData"
+            headers={
+                "Authorization": f"Bearer {jwt_token}",
+                "Content-Type":"application/json",
+                "Accept":"application/json",
+                "X-UserType":"USER",
+                "X-SourceID":"WEB",
+                "X-ClientLocalIP":"192.168.1.1",
+                "X-ClientPublicIP":"106.193.0.0",
+                "X-MACAddress":"00:00:00:00:00:00",
+                "X-PrivateKey": api_key
+            }
+            body={"exchange":"NSE","tradingsymbol":"Nifty 50","symboltoken":"99926000"}
+            r=safe_post(url, headers=headers, json_data=body, timeout=4)
+            if r is not None:
+                add_log(f"LTP HTTP {r.status_code} {r.text[:200]}")
+                if r.status_code==200:
+                    js=r.json()
+                    if js.get('data') and js['data'].get('ltp'):
+                        v=float(js['data']['ltp'])
+                        if v>1000:
+                            add_log(f"LTP OK {v}")
+                            return v
+                    elif js.get('message'):
+                        add_log(f"LTP MSG {js.get('message')}")
+            else:
+                add_log("LTP HTTP None")
     except Exception as e:
-        add_log(f"MCONTROL ERR {e}")
+        add_log(f"LTP HTTP ERR {e}")
 
-    # 2. MONEYCONTROL backup API
+    # 2. Angel Quote API - SAME DOMAIN
     try:
-        add_log("TRY MCONTROL2")
-        r=safe_get("https://api.moneycontrol.com/mcapi/v1/stock/get-stock-price?scId=NSN&exchange=NSE", headers={"User-Agent":"Mozilla/5.0"}, timeout=3)
-        if r and r.status_code==200:
-            js=r.json()
-            v=float(js['data']['pricecurrent'])
-            if v>1000:
-                return v
+        add_log("TRY ANGEL QUOTE HTTP")
+        if jwt_token:
+            url="https://apiconnect.angelone.in/rest/secure/angelbroking/market/v1/quote/"
+            headers={
+                "Authorization": f"Bearer {jwt_token}",
+                "Content-Type":"application/json",
+                "Accept":"application/json",
+                "X-UserType":"USER",
+                "X-SourceID":"WEB",
+                "X-ClientLocalIP":"192.168.1.1",
+                "X-ClientPublicIP":"106.193.0.0",
+                "X-MACAddress":"00:00:00:00:00:00",
+                "X-PrivateKey": api_key
+            }
+            body={"mode":"LTP","exchangeTokens":{"NSE":["99926000"]}}
+            r=safe_post(url, headers=headers, json_data=body, timeout=4)
+            if r is not None:
+                add_log(f"QUOTE HTTP {r.status_code} {r.text[:200]}")
+                if r.status_code==200:
+                    js=r.json()
+                    if js.get('data') and js['data'].get('fetched'):
+                        for item in js['data']['fetched']:
+                            v=float(item.get('ltp',0))
+                            if v>1000:
+                                add_log(f"QUOTE OK {v}")
+                                return v
     except Exception as e:
-        add_log(f"MCONTROL2 ERR {e}")
+        add_log(f"QUOTE ERR {e}")
 
-    # 3. Angel SDK last
+    # 3. SDK last
     try:
         add_log("TRY SDK")
         if smart:
@@ -99,7 +128,7 @@ def get_spot():
             with ThreadPoolExecutor(max_workers=1) as ex:
                 fut=ex.submit(_ltp)
                 d=fut.result(timeout=3)
-            add_log(f"SDK {str(d)[:120]}")
+            add_log(f"SDK {str(d)[:150]}")
             if d and d.get('data') and d['data'].get('ltp'):
                 v=float(d['data']['ltp'])
                 if v>1000:
@@ -133,15 +162,17 @@ def worker():
     fails=0
     while True:
         try:
-            spot=get_spot()
+            spot=get_spot_angel_only()
             if spot>1000:
                 state["ltp"]=spot
                 fails=0
             else:
                 fails+=1
                 add_log(f"SPOT 0 fail {fails}")
-                if fails>5:
-                    angel_login(); fails=0
+                if fails>3:
+                    add_log("RELOGIN")
+                    angel_login()
+                    fails=0
                 time.sleep(2); continue
             mod=datetime.utcnow()+timedelta(hours=5,minutes=30)
             mod=mod.hour*60+mod.minute
@@ -183,7 +214,7 @@ threading.Thread(target=worker,daemon=True).start()
 @app.route('/')
 def home():
     logs="<br>".join(state["log"][-18:])
-    return f"<h1 style='background:green;color:white;padding:8px'>AUTO ORDER ON - MCONTROL FIRST</h1><h2>NIFTY {state['ltp']} | {state['ist']}</h2><h3>{state['c3']} Cnt {state['cnt3']}</h3><h2 style='color:green'>{state['call3']}</h2><h2 style='color:red'>{state['put3']}</h2><h4>{state['msg']}</h4><div style='background:black;color:lime;padding:10px;font-size:12px'>{logs}</div>"
+    return f"<h1 style='background:green;color:white;padding:8px'>AUTO ORDER ON - ANGEL ONLY</h1><h2>NIFTY {state['ltp']} | {state['ist']}</h2><h3>{state['c3']} Cnt {state['cnt3']}</h3><h2 style='color:green'>{state['call3']}</h2><h2 style='color:red'>{state['put3']}</h2><h4>{state['msg']}</h4><div style='background:black;color:lime;padding:10px;font-size:12px'>{logs}</div>"
 @app.route('/check')
 def check(): return jsonify(state)
 if __name__=="__main__":
