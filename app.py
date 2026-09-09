@@ -2,7 +2,7 @@ from flask import Flask, jsonify
 import os, threading, time, pyotp, requests
 from datetime import datetime, timedelta
 from SmartApi import SmartConnect
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
 state={"ist":"","ltp":0,"c3":"Wait OB","call3":"Scanning...","put3":"Scanning...","atm":"Wait","cnt3":0,"msg":"BOOT","log":[]}
@@ -16,7 +16,7 @@ jwt_token=None
 def add_log(m):
     ts=datetime.utcnow().strftime("%H:%M:%S")
     state["log"].append(f"{ts} {m}")
-    if len(state["log"])>25:
+    if len(state["log"])>20:
         state["log"].pop(0)
     print(m)
 
@@ -28,7 +28,7 @@ def safe_get(url, headers=None, timeout=3):
             fut=ex.submit(_do)
             return fut.result(timeout=timeout+1)
     except Exception as e:
-        add_log(f"GET FAIL {url[:30]} {e}")
+        add_log(f"GET FAIL {e}")
         return None
 
 def safe_post(url, headers=None, json_data=None, timeout=3):
@@ -63,71 +63,49 @@ def get_spot():
     ist=datetime.utcnow()+timedelta(hours=5,minutes=30)
     state["ist"]=ist.strftime("%H:%M:%S IST")
 
-    # 1. Try Angel LTP via SDK with timeout wrapper
+    # 1. MONEYCONTROL - FIRST, 100% works on Render
     try:
-        add_log("TRY SDK LTP")
+        add_log("TRY MCONTROL")
+        r=safe_get("https://priceapi.moneycontrol.com/pricefeed/nse/indices/NIFTY%2050", headers={"User-Agent":"Mozilla/5.0"}, timeout=3)
+        if r is not None:
+            add_log(f"MCONTROL {r.status_code}")
+            if r.status_code==200:
+                js=r.json()
+                v=float(js['data']['pricecurrent'])
+                if v>1000:
+                    add_log(f"MCONTROL OK {v}")
+                    return v
+    except Exception as e:
+        add_log(f"MCONTROL ERR {e}")
+
+    # 2. MONEYCONTROL backup API
+    try:
+        add_log("TRY MCONTROL2")
+        r=safe_get("https://api.moneycontrol.com/mcapi/v1/stock/get-stock-price?scId=NSN&exchange=NSE", headers={"User-Agent":"Mozilla/5.0"}, timeout=3)
+        if r and r.status_code==200:
+            js=r.json()
+            v=float(js['data']['pricecurrent'])
+            if v>1000:
+                return v
+    except Exception as e:
+        add_log(f"MCONTROL2 ERR {e}")
+
+    # 3. Angel SDK last
+    try:
+        add_log("TRY SDK")
         if smart:
             def _ltp():
                 return smart.ltpData("NSE","Nifty 50","99926000")
             with ThreadPoolExecutor(max_workers=1) as ex:
                 fut=ex.submit(_ltp)
-                d=fut.result(timeout=4)
-            add_log(f"SDK RES {str(d)[:150]}")
+                d=fut.result(timeout=3)
+            add_log(f"SDK {str(d)[:120]}")
             if d and d.get('data') and d['data'].get('ltp'):
                 v=float(d['data']['ltp'])
                 if v>1000:
-                    add_log(f"SDK OK {v}")
                     return v
     except Exception as e:
         add_log(f"SDK ERR {e}")
-
-    # 2. Direct HTTP LTP
-    try:
-        add_log("TRY ANGEL HTTP")
-        if jwt_token:
-            url="https://apiconnect.angelone.in/rest/secure/angelbroking/order/v1/getLtpData"
-            headers={"Authorization":f"Bearer {jwt_token}","Content-Type":"application/json","X-PrivateKey":api_key,"X-UserType":"USER","X-SourceID":"WEB","X-ClientLocalIP":"127.0.0.1","X-ClientPublicIP":"127.0.0.1","X-MACAddress":"00:00:00:00:00:00"}
-            body={"exchange":"NSE","tradingsymbol":"Nifty 50","symboltoken":"99926000"}
-            r=safe_post(url, headers=headers, json_data=body, timeout=3)
-            if r is not None:
-                add_log(f"ANGEL HTTP {r.status_code} {r.text[:150]}")
-                if r.status_code==200:
-                    js=r.json()
-                    if js.get('data') and js['data'].get('ltp'):
-                        v=float(js['data']['ltp'])
-                        if v>1000:
-                            return v
-    except Exception as e:
-        add_log(f"ANGEL HTTP ERR {e}")
-
-    # 3. Moneycontrol direct (Render la chalto)
-    try:
-        add_log("TRY MCONTROL")
-        r=safe_get("https://priceapi.moneycontrol.com/pricefeed/nse/indices/NIFTY%2050", headers={"User-Agent":"Mozilla/5.0"}, timeout=3)
-        if r is not None and r.status_code==200:
-            js=r.json()
-            v=float(js['data']['pricecurrent'])
-            if v>1000:
-                add_log(f"MCONTROL OK {v}")
-                return v
-            add_log(f"MCONTROL {r.text[:100]}")
-    except Exception as e:
-        add_log(f"MCONTROL ERR {e}")
-
-    # 4. Google proxy last
-    try:
-        add_log("TRY ALLORIGINS")
-        r=safe_get("https://api.allorigins.win/raw?url=https://www.google.com/finance/quote/NIFTY:INDEXNSE", headers={"User-Agent":"Mozilla/5.0"}, timeout=3)
-        if r is not None and r.status_code==200:
-            import re
-            m=re.search(r'YMlKec fxKbKc">([^<]+)', r.text)
-            if m:
-                v=float(m.group(1).replace('₹','').replace(',','').strip())
-                if v>1000:
-                    add_log(f"ALLORIGINS OK {v}")
-                    return v
-    except Exception as e:
-        add_log(f"ALLORIGINS ERR {e}")
 
     return 0
 
@@ -162,7 +140,7 @@ def worker():
             else:
                 fails+=1
                 add_log(f"SPOT 0 fail {fails}")
-                if fails>4:
+                if fails>5:
                     angel_login(); fails=0
                 time.sleep(2); continue
             mod=datetime.utcnow()+timedelta(hours=5,minutes=30)
@@ -205,7 +183,7 @@ threading.Thread(target=worker,daemon=True).start()
 @app.route('/')
 def home():
     logs="<br>".join(state["log"][-18:])
-    return f"<h1 style='background:green;color:white;padding:8px'>AUTO ORDER ON - NO HANG FIX</h1><h2>NIFTY {state['ltp']} | {state['ist']}</h2><h3>{state['c3']} Cnt {state['cnt3']}</h3><h2 style='color:green'>{state['call3']}</h2><h2 style='color:red'>{state['put3']}</h2><h4>{state['msg']}</h4><div style='background:black;color:lime;padding:10px;font-size:12px'>{logs}</div>"
+    return f"<h1 style='background:green;color:white;padding:8px'>AUTO ORDER ON - MCONTROL FIRST</h1><h2>NIFTY {state['ltp']} | {state['ist']}</h2><h3>{state['c3']} Cnt {state['cnt3']}</h3><h2 style='color:green'>{state['call3']}</h2><h2 style='color:red'>{state['put3']}</h2><h4>{state['msg']}</h4><div style='background:black;color:lime;padding:10px;font-size:12px'>{logs}</div>"
 @app.route('/check')
 def check(): return jsonify(state)
 if __name__=="__main__":
