@@ -1,16 +1,17 @@
-from flask import Flask, jsonify
-import os, threading, time, pyotp, requests
+from flask import Flask, jsonify, request
+import os, threading, time, pyotp
 from datetime import datetime, timedelta
 from SmartApi import SmartConnect
 
 app = Flask(__name__)
-state={"ist":"","ltp":0,"c3":"Wait OB","call3":"Scanning NSE...","put3":"Scanning NSE...","atm":"Wait","cnt3":0,"msg":"BOOT","log":[]}
+state={"ist":"","ltp":0,"c3":"Wait OB","call3":"Waiting for Local LTP...","put3":"Waiting for Local LTP...","atm":"Wait","cnt3":0,"msg":"BOOT - HYBRID MODE","log":[]}
 
 api_key=os.getenv("ANGEL_API_KEY")
 client_id=os.getenv("ANGEL_CLIENT_ID")
 pwd=os.getenv("ANGEL_PASSWORD")
 totp_secret=os.getenv("ANGEL_TOTP_SECRET")
 smart=None
+last_ltp_update = 0
 
 def add_log(m):
     ts=datetime.utcnow().strftime("%H:%M:%S")
@@ -26,8 +27,8 @@ def angel_login():
         totp=pyotp.TOTP(totp_secret).now()
         data=s.generateSession(client_id, pwd, totp)
         smart=s
-        add_log("LOGIN OK - ORDER READY")
-        state["msg"]="Login OK NSE LTP ON"
+        add_log("LOGIN OK - READY FOR ORDER")
+        state["msg"]="Login OK - Waiting LTP from Local"
         return True
     except Exception as e:
         add_log(f"LOGIN FAIL {e}")
@@ -35,93 +36,40 @@ def angel_login():
 
 angel_login()
 
-def get_nse_ltp():
-    ist=datetime.utcnow()+timedelta(hours=5,minutes=30)
-    state["ist"]=ist.strftime("%H:%M:%S IST")
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Accept": "application/json",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    # 1. NSE allIndices - MOST RELIABLE
+@app.route('/set_ltp')
+def set_ltp():
+    global last_ltp_update
     try:
-        add_log("TRY NSE ALL INDICES")
-        # First get cookie from NSE
-        s = requests.Session()
-        s.get("https://www.nseindia.com", headers=headers, timeout=5)
-        r = s.get("https://www.nseindia.com/api/allIndices", headers=headers, timeout=5)
-        add_log(f"NSE ALL {r.status_code} len {len(r.text)}")
-        if r.status_code==200:
-            js=r.json()
-            for item in js.get('data',[]):
-                if item.get('index')=='NIFTY 50':
-                    v=float(item.get('last',0))
-                    if v>1000:
-                        add_log(f"NSE OK {v}")
-                        return v
+        price = float(request.args.get('price',0))
+        if price>1000:
+            state["ltp"]=price
+            state["ist"]=(datetime.utcnow()+timedelta(hours=5,minutes=30)).strftime("%H:%M:%S IST")
+            last_ltp_update=time.time()
+            state["msg"]=f"LTP Updated {price} from Local"
+            return jsonify({"status":"ok","ltp":price})
     except Exception as e:
-        add_log(f"NSE ALL ERR {e}")
-
-    # 2. NSE 50 via marketStatus
-    try:
-        add_log("TRY NSE MARKETSTATUS")
-        s = requests.Session()
-        s.get("https://www.nseindia.com", headers=headers, timeout=5)
-        r = s.get("https://www.nseindia.com/api/marketStatus", headers=headers, timeout=5)
-        add_log(f"NSE STATUS {r.status_code}")
-        if r.status_code==200:
-            js=r.json()
-            for m in js.get('marketState',[]):
-                for idx in m.get('marketStatus',[]):
-                    # search
-                    pass
-    except Exception as e:
-        add_log(f"NSE STATUS ERR {e}")
-
-    # 3. NiftyTrader free API - very light
-    try:
-        add_log("TRY NIFTYTRADER")
-        r = requests.get("https://api.niftytrader.in/api/FinNiftyNiftyBankNiftyIncludesNifty50AndIndices", headers=headers, timeout=5)
-        add_log(f"NIFTYTRADER {r.status_code}")
-        if r.status_code==200:
-            js=r.json()
-            # parse
-    except Exception as e:
-        add_log(f"NIFTYTRADER ERR {e}")
-
-    # 4. Simple Google search page - no allorigins
-    try:
-        add_log("TRY GOOGLE DIRECT")
-        r = requests.get("https://www.google.com/finance/quote/NIFTY:INDEXNSE", headers=headers, timeout=5)
-        add_log(f"GOOGLE {r.status_code} len {len(r.text)}")
-        if r.status_code==200:
-            import re
-            m=re.search(r'YMlKec fxKbKc">([^<]+)', r.text)
-            if m:
-                txt=m.group(1).replace('₹','').replace(',','').strip()
-                v=float(txt)
-                if v>1000:
-                    add_log(f"GOOGLE OK {v}")
-                    return v
-    except Exception as e:
-        add_log(f"GOOGLE ERR {e}")
-
-    return 0
+        add_log(f"SET LTP ERR {e}")
+    return jsonify({"status":"fail"})
 
 def place_order(strike,opt_type):
     try:
-        if not smart: return None
+        if not smart:
+            add_log("SMART NONE - RELOGIN")
+            angel_login()
+            return None
         res=smart.searchScrip("NFO", f"{strike}{opt_type}")
         token=tsym=None
         if res and 'data' in res:
             for item in res['data']:
                 if str(strike) in item['tradingsymbol'] and opt_type in item['tradingsymbol']:
                     token=item['token']; tsym=item['tradingsymbol']; break
-        if not token: return None
+        if not token:
+            add_log(f"TOKEN NOT FOUND {strike}{opt_type}")
+            return None
         orderparams={"variety":"NORMAL","tradingsymbol":tsym,"symboltoken":token,"transactiontype":"BUY","exchange":"NFO","ordertype":"MARKET","producttype":"INTRADAY","duration":"DAY","quantity":65}
         oid=smart.placeOrder(orderparams)
         state["msg"]=f"ORDER OK {tsym} {oid}"
-        add_log(f"ORDER {tsym} {oid}")
+        add_log(f"ORDER SUCCESS {tsym} {oid}")
         return oid
     except Exception as e:
         add_log(f"ORDER ERR {e}"); return None
@@ -130,20 +78,16 @@ live3=None; first3=None; phase3=0; b3up=False; b3dn=False
 
 def worker():
     global live3, first3, phase3, b3up, b3dn
-    fails=0
     while True:
         try:
-            spot=get_nse_ltp()
-            if spot>1000:
-                state["ltp"]=spot
-                fails=0
-            else:
-                fails+=1
-                add_log(f"SPOT 0 fail {fails}")
-                if fails>4:
-                    angel_login()
-                    fails=0
-                time.sleep(3); continue
+            # Check if LTP is stale
+            if time.time() - last_ltp_update > 15 and last_ltp_update!=0:
+                state["call3"]=f"LTP STALE! Local script band aahe! Last {int(time.time()-last_ltp_update)}s ago"
+                time.sleep(1); continue
+
+            spot=state["ltp"]
+            if spot<1000:
+                time.sleep(0.5); continue
 
             mod=datetime.utcnow()+timedelta(hours=5,minutes=30)
             mod=mod.hour*60+mod.minute
@@ -157,10 +101,10 @@ def worker():
                     elif phase3==1:
                         sec=live3
                         if sec[1]>first3[1]:
-                            b3up=True; b3dn=False; phase3=2; state["call3"]=f"BREAK UP {sec[1]:.0f}>{first3[1]:.0f}"
+                            b3up=True; b3dn=False; phase3=2; state["call3"]=f"BREAK UP {sec[1]:.0f}>{first3[1]:.0f} 50% wait"
                             add_log(state["call3"])
                         elif sec[2]<first3[2]:
-                            b3dn=True; b3up=False; phase3=2; state["put3"]=f"BREAK DN {sec[2]:.0f}<{first3[2]:.0f}"
+                            b3dn=True; b3up=False; phase3=2; state["put3"]=f"BREAK DN {sec[2]:.0f}<{first3[2]:.0f} 50% wait"
                             add_log(state["put3"])
                         else:
                             first3=sec
@@ -175,22 +119,26 @@ def worker():
                     if b3up:
                         state["cnt3"]+=1; oid=place_order(strike,"CE")
                         state["call3"]=f"#{state['cnt3']} CALL {strike}CE 50%={fifty} ID:{oid}"
+                        add_log(state["call3"])
                         phase3=0; first3=None; b3up=False; b3dn=False
                     elif b3dn:
                         state["cnt3"]+=1; oid=place_order(strike,"PE")
                         state["put3"]=f"#{state['cnt3']} PUT {strike}PE 50%={fifty} ID:{oid}"
+                        add_log(state["put3"])
                         phase3=0; first3=None; b3up=False; b3dn=False
-            time.sleep(1)
+            time.sleep(0.5)
         except Exception as e:
-            add_log(f"WORKER ERR {e}"); time.sleep(2)
+            add_log(f"WORKER ERR {e}"); time.sleep(1)
 
 threading.Thread(target=worker,daemon=True).start()
 
 @app.route('/')
 def home():
-    logs="<br>".join(state["log"][-20:])
-    return f"<h1 style='background:green;color:white;padding:8px'>AUTO ORDER ON - NSE DIRECT</h1><h2>NIFTY {state['ltp']} | {state['ist']}</h2><h3>{state['c3']} Cnt {state['cnt3']}</h3><h2 style='color:green'>{state['call3']}</h2><h2 style='color:red'>{state['put3']}</h2><h4>{state['msg']}</h4><div style='background:black;color:lime;padding:10px;font-size:12px;height:280px;overflow:auto'>{logs}</div>"
+    logs="<br>".join(state["log"][-22:])
+    age = int(time.time()-last_ltp_update) if last_ltp_update else 999
+    return f"<h1 style='background:green;color:white;padding:8px'>AUTO ORDER ON - HYBRID MODE</h1><h2>NIFTY {state['ltp']} | {state['ist']} | Age {age}s</h2><h3>{state['c3']} Cnt {state['cnt3']}</h3><h2 style='color:green'>{state['call3']}</h2><h2 style='color:red'>{state['put3']}</h2><h4>{state['msg']}</h4><div style='background:black;color:lime;padding:10px;font-size:12px;height:300px;overflow:auto'>{logs}</div><p>Send LTP: /set_ltp?price=23511</p>"
 @app.route('/check')
 def check(): return jsonify(state)
+
 if __name__=="__main__":
     app.run(host='0.0.0.0',port=10000)
