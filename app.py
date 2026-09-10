@@ -15,8 +15,9 @@ angel = None
 IST = timezone(timedelta(hours=5, minutes=30))
 QTY = 65
 
-OB3 = {"h":0,"l":0,"fifty":0,"active":False,"cnt":0}
-OB5 = {"h":0,"l":0,"fifty":0,"active":False,"cnt":0}
+# OB - Live NIFTY varun track karu
+OB3 = {"h":0,"l":0,"fifty":0,"active":False,"start":"09:15","end":"09:18","locked":False}
+OB5 = {"h":0,"l":0,"fifty":0,"active":False,"start":"09:15","end":"09:20","locked":False}
 
 def ist_now(): return datetime.now(IST)
 
@@ -43,63 +44,64 @@ def get_atm(obj, nifty, typ):
     except: pass
     return f"NIFTY{strike}{typ}", "0", 0.0, strike
 
-def get_ob_via_1min(obj, mins):
-    # 1min candle gheun 3min/5min cha OB banav
-    try:
-        now = ist_now()
-        frm = now.strftime("%Y-%m-%d 09:15")
-        to = now.strftime("%Y-%m-%d %H:%M")
-        data = obj.getCandleData({"exchange":"NSE","symboltoken":"26000","interval":"ONE_MINUTE","fromdate":frm,"todate":to})
-        if data and data.get('data'):
-            candles = data['data']
-            if len(candles) >= mins:
-                first_n = candles[:mins]
-                h = max(float(c[2]) for c in first_n)
-                l = min(float(c[3]) for c in first_n)
-                fifty = round((h+l)/2,2)
-                # Break check - nantarche candles high break kartat ka
-                active = False
-                if len(candles) > mins:
-                    for c in candles[mins:]:
-                        if float(c[2]) > h:
-                            active=True
-                            break
-                return h,l,fifty,active,len(candles)
-    except Exception as e:
-        print(f"OB {mins}M err {e}")
-    return 0,0,0,False,0
-
 @app.route('/')
 def home():
     obj = get_client()
     now = ist_now()
-    nifty = 23426.95
+    cur_time_str = now.strftime("%H:%M:%S")
+    cur_hm = now.strftime("%H:%M")
+    
+    nifty = 23415.95
     try: nifty = float(obj.ltpData("NSE","NIFTY","26000")['data']['ltp'])
     except: pass
 
     ce_sym, ce_tok, ce_ltp, strike = get_atm(obj, nifty, "CE")
     pe_sym, pe_tok, pe_ltp, _ = get_atm(obj, nifty, "PE")
 
-    # NEW METHOD - 1MIN varun
-    h3,l3,f3,a3,c3 = get_ob_via_1min(obj, 3)
-    if h3!=0:
-        OB3.update({"h":h3,"l":l3,"fifty":f3,"active":a3,"cnt":c3})
+    # 3MIN OB TRACK - 09:15 te 09:18 paryant NIFTY cha H/L ghe
+    if "09:15" <= cur_hm <= "09:18":
+        if OB3["h"]==0:
+            OB3["h"]=nifty; OB3["l"]=nifty
+        else:
+            if nifty > OB3["h"]: OB3["h"]=nifty
+            if nifty < OB3["l"]: OB3["l"]=nifty
+    elif cur_hm > "09:18" and not OB3["locked"] and OB3["h"]!=0:
+        OB3["fifty"]=round((OB3["h"]+OB3["l"])/2,2)
+        OB3["locked"]=True
 
-    h5,l5,f5,a5,c5 = get_ob_via_1min(obj, 5)
-    if h5!=0:
-        OB5.update({"h":h5,"l":l5,"fifty":f5,"active":a5,"cnt":c5})
+    # 5MIN OB TRACK - 09:15 te 09:20
+    if "09:15" <= cur_hm <= "09:20":
+        if OB5["h"]==0:
+            OB5["h"]=nifty; OB5["l"]=nifty
+        else:
+            if nifty > OB5["h"]: OB5["h"]=nifty
+            if nifty < OB5["l"]: OB5["l"]=nifty
+    elif cur_hm > "09:20" and not OB5["locked"] and OB5["h"]!=0:
+        OB5["fifty"]=round((OB5["h"]+OB5["l"])/2,2)
+        OB5["locked"]=True
+
+    # Break Check - 09:18 nantar High break zala ka?
+    if OB3["locked"] and cur_hm > "09:18":
+        if nifty > OB3["h"]:
+            OB3["active"]=True
+
+    if OB5["locked"] and cur_hm > "09:20":
+        if nifty > OB5["h"]:
+            OB5["active"]=True
 
     return f"""
-    <html><head><meta http-equiv="refresh" content="3">
+    <html><head>
+    <meta http-equiv="refresh" content="3">
+    <script>setTimeout(()=>{{location.reload();}}, 3000);</script>
     <style>body{{background:#000;color:#fff;font-family:monospace;padding:8px}}.box{{border:1px solid #0f0;padding:8px;margin:4px;border-radius:6px;background:#111}}</style>
     </head><body>
-    <h3 style="color:#0f0">AKASH LIVE - 3MIN + 5MIN FIXED via 1MIN | QTY {QTY}</h3>
-    <div class="box" style="border-color:yellow">NIFTY: <b style="font-size:20px">{nifty}</b> | STRIKE: {strike} | CE: {ce_sym} LTP <b style="color:#0ff;font-size:20px">{ce_ltp}</b> | PE {pe_ltp} | {now.strftime('%H:%M:%S')} | Candles: {c3}/{c5}</div>
+    <h3 style="color:#0f0">AKASH LIVE - AUTO 3SEC | NO CANDLE API - LIVE NIFTY TRACK | {cur_time_str}</h3>
+    <div class="box" style="border-color:yellow">NIFTY: <b style="font-size:22px;color:#ff0">{nifty}</b> | STRIKE: {strike} | CE {ce_sym} LTP <b style="font-size:22px;color:#0ff">{ce_ltp}</b> | PE {pe_ltp}</div>
     <div style="display:flex;gap:5px">
-        <div class="box" style="flex:1;border-color:#0ff">3 MIN OB (9:15-9:18 via 1MIN)<br>H: {OB3['h']} L: {OB3['l']}<br>50%: {OB3['fifty']}<br>Active: {OB3['active']} Break | Cnt {OB3['cnt']}</div>
-        <div class="box" style="flex:1;border-color:#f0f">5 MIN OB (9:15-9:20 via 1MIN)<br>H: {OB5['h']} L: {OB5['l']}<br>50%: {OB5['fifty']}<br>Active: {OB5['active']} Break | Cnt {OB5['cnt']}</div>
+        <div class="box" style="flex:1;border-color:#0ff"><b>3 MIN OB (09:15-09:18) LIVE TRACK</b><br>H: {round(OB3['h'],2)} L: {round(OB3['l'],2)}<br>50%: {OB3['fifty']}<br>Locked: {OB3['locked']} Active Break: {OB3['active']}</div>
+        <div class="box" style="flex:1;border-color:#f0f"><b>5 MIN OB (09:15-09:20) LIVE TRACK</b><br>H: {round(OB5['h'],2)} L: {round(OB5['l'],2)}<br>50%: {OB5['fifty']}<br>Locked: {OB5['locked']} Active Break: {OB5['active']}</div>
     </div>
-    <div class="box">Left Chart: NIFTY 23400 PE 85.28. Market volatile ahe. Aata OB H/L 0 janar nahi. Deploy karun 1 min ne refresh kar.</div>
+    <div class="box" style="border-color:#0f0">✓ Auto Refresh 3 Sec ON | ✓ Candle API nako - Direct NIFTY LTP varun OB | {cur_time_str} la update</div>
     </body></html>
     """
 
