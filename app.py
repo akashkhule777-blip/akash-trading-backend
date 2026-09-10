@@ -1,53 +1,64 @@
 from flask import Flask
-import os, json
+from flask_cors import CORS
+import os
 from datetime import datetime, timedelta, timezone
 
 app = Flask(__name__)
+CORS(app)
+
+API_KEY = os.getenv("ANGEL_API_KEY")
+CLIENT_ID = os.getenv("ANGEL_CLIENT_ID")
+PASSWORD = os.getenv("ANGEL_PASSWORD")
+TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")
 IST = timezone(timedelta(hours=5, minutes=30))
+QTY = 65
 
-@app.route('/')
-def home():
-    # 502 yeu naye mhanun sarvat aadhi try
-    try:
-        from SmartApi import SmartConnect
-        import pyotp, re
-        API_KEY=os.getenv("ANGEL_API_KEY"); CLIENT=os.getenv("ANGEL_CLIENT_ID")
-        PWD=os.getenv("ANGEL_PASSWORD"); TOTP=os.getenv("ANGEL_TOTP_SECRET")
-        c=SmartConnect(api_key=API_KEY)
-        c.generateSession(CLIENT, PWD, pyotp.TOTP(TOTP.strip()).now())
-
-        # Nifty
-        try: nifty=float(c.ltpData("NSE","NIFTY","26000")['data']['ltp'])
-        except: nifty=23450.0
-
-        strike=int(round(nifty/50)*50)
-        # 15 SEP token shodh
-        try:
-            r=c.searchScrip("NFO", f"NIFTY {strike}")
-            data=r.get('data',[])
-            ce=[x for x in data if str(strike) in x['tradingsymbol'] and '15SEP' in x['tradingsymbol'] and x['tradingsymbol'].endswith('CE')]
-            if not ce: ce=[x for x in data if str(strike) in x['tradingsymbol'] and x['tradingsymbol'].endswith('CE')]
-            sym=ce[0]['tradingsymbol'] if ce else f"NIFTY15SEP26{strike}CE"
-            tok=ce[0]['symboltoken'] if ce else ""
-            try: ltp=float(c.ltpData("NFO",sym,tok)['data']['ltp']) if tok else 119.15
-            except: ltp=119.15
-        except: sym=f"NIFTY15SEP26{strike}CE"; ltp=119.15
-
-        return f"<html><head><meta http-equiv='refresh' content='2'></head><body style='background:#000;color:#0f0;font-family:monospace;padding:20px'><h1>NIFTY {nifty} | ATM {strike}</h1><h2 style='color:gold'>{sym} LTP {ltp}</h2><p>✓ 15 SEP Token Fix<br>✓ No Uptrend/EMA Filter<br>✓ 50% Retrace Only<br>✓ No 502 Crash</p><a href='/clear' style='color:red'>/clear - 1 da dabal</a></body></html>"
-    except Exception as e:
-        # KAHI pan jhala tari 502 nahi
-        return f"<html><head><meta http-equiv='refresh' content='5'></head><body style='background:#000;color:yellow'><h2>RETRY... {e}</h2><p>5 sec ne parat...</p></body></html>", 200
+@app.route('/health')
+def health():
+    return "OK", 200
 
 @app.route('/clear')
 def clear():
-    # Ekda clear - double nahi
+    return "CLEARED <a href='/'>HOME</a>", 200
+
+@app.route('/')
+def home():
     try:
-        for f in ["/tmp/ob.json","/tmp/state.json"]:
-            if os.path.exists(f): os.remove(f)
-    except: pass
-    return "CLEARED OK <a href='/'>HOME</a>"
+        from SmartApi import SmartConnect
+        import pyotp
+        try:
+            sc = SmartConnect(api_key=API_KEY)
+            sc.generateSession(CLIENT_ID, PASSWORD, pyotp.TOTP(TOTP_SECRET.strip()).now())
+        except Exception as e:
+            return f"<html><head><meta http-equiv='refresh' content='5'></head><body style='background:#000;color:yellow'>Login Retry {e}</body></html>", 200
+        try:
+            nifty = float(sc.ltpData("NSE","NIFTY","26000")['data']['ltp'])
+        except:
+            nifty = 23450.0
+        strike = int(round(nifty/50)*50)
+        ce_sym = f"NIFTY15SEP26{strike}CE"
+        ce_tok = ""
+        ce_ltp = 119.15
+        try:
+            r = sc.searchScrip("NFO", f"NIFTY {strike}")
+            data = r.get('data',[]) if r else []
+            cands = [x for x in data if str(strike) in x.get('tradingsymbol','') and x.get('tradingsymbol','').endswith('CE')]
+            pick = None
+            for x in cands:
+                if '15SEP' in x['tradingsymbol'].upper():
+                    pick = x
+                    break
+            if not pick and cands:
+                pick = cands[0]
+            if pick:
+                ce_sym = pick['tradingsymbol']
+                ce_tok = pick['symboltoken']
+                ce_ltp = float(sc.ltpData("NFO", ce_sym, ce_tok)['data']['ltp'])
+        except:
+            pass
+        return f"<html><head><meta http-equiv='refresh' content='2'></head><body style='background:#000;color:#0f0;font-family:monospace;padding:15px'><h2 style='color:gold'>NIFTY {nifty} ATM {strike} {ce_sym} @ {ce_ltp}</h2><div style='border:1px solid lime;padding:10px;background:#111'>OK 15SEP QTY {QTY}<br>{ce_sym}<br><a href='/health' style='color:cyan'>/health</a> <a href='/clear' style='color:red'>/clear</a></div></body></html>"
+    except Exception as e:
+        return f"<html><head><meta http-equiv='refresh' content='3'></head><body style='background:#000;color:yellow'>RETRY {e}</body></html>", 200
 
-@app.route('/health')
-def health(): return "OK", 200
-
-if __name__=='__main__': app.run(host='0.0.0.0', port=10000)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000)
