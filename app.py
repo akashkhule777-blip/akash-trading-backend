@@ -7,7 +7,7 @@ import pyotp
 app = Flask(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
 QTY = 65
-TARGET_DAY = 5000 # 5000 Rs var DAY CLOSE
+TARGET_DAY = 5000
 FILE = "/tmp/ob_final.json"
 
 API_KEY = os.getenv("ANGEL_API_KEY")
@@ -16,13 +16,11 @@ PASSWORD = os.getenv("ANGEL_PASSWORD")
 TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")
 
 def ist_now(): return datetime.now(IST)
-
 def load():
     if os.path.exists(FILE):
         try: return json.load(open(FILE,'r'))
         except: pass
     return {"obs_ce":[],"obs_pe":[],"traded":[],"open":[],"day_pnl":0,"date":"","closed":False}
-
 def save(d):
     try: json.dump(d, open(FILE,'w'))
     except: pass
@@ -49,10 +47,19 @@ def get_atm(obj, nifty):
 
 def place_buy_sl(obj, sym, tok, sl):
     try:
-        r1 = obj.placeOrder({"variety":"NORMAL","tradingsymbol":sym,"symboltoken":tok,"transactiontype":"BUY","exchange":"NFO","ordertype":"MARKET","producttype":"INTRADAY","duration":"DAY","quantity":str(QTY)})
-        obj.placeOrder({"variety":"STOPLOSS","tradingsymbol":sym,"symboltoken":tok,"transactiontype":"SELL","exchange":"NFO","ordertype":"STOPLOSS_MARKET","producttype":"INTRADAY","duration":"DAY","triggerprice":str(round(float(sl),1)),"quantity":str(QTY)})
-        return str(r1)[:20]
-    except Exception as e: return f"ERR {str(e)[:50]}"
+        # FIXED: Response handle safe
+        m_order = {"variety":"NORMAL","tradingsymbol":sym,"symboltoken":tok,"transactiontype":"BUY","exchange":"NFO","ordertype":"MARKET","producttype":"INTRADAY","duration":"DAY","quantity":str(QTY)}
+        r1 = obj.placeOrder(m_order)
+        # Angel kadhi dict deto kadhi string, donhi handle
+        order_id = ""
+        if isinstance(r1, dict): order_id = str(r1.get('data',{}).get('orderid','')) or str(r1)
+        else: order_id = str(r1)
+
+        sl_order = {"variety":"STOPLOSS","tradingsymbol":sym,"symboltoken":tok,"transactiontype":"SELL","exchange":"NFO","ordertype":"STOPLOSS_MARKET","producttype":"INTRADAY","duration":"DAY","triggerprice":str(round(float(sl),1)),"quantity":str(QTY)}
+        r2 = obj.placeOrder(sl_order)
+        return f"OK {order_id[:12]}"
+    except Exception as e:
+        return f"ERR {str(e)[:60]}"
 
 @app.route('/')
 def home():
@@ -60,10 +67,8 @@ def home():
     n = ist_now()
     today = n.strftime("%Y-%m-%d")
     cur_hm = n.strftime("%H:%M")
-
     try: nifty = float(obj.ltpData("NSE","NIFTY","26000")['data']['ltp'])
     except: nifty = 23400
-
     ce_sym, ce_tok, pe_sym, pe_tok, strike = get_atm(obj, nifty)
     try: ce_ltp = float(obj.ltpData("NFO",ce_sym,ce_tok)['data']['ltp'])
     except: ce_ltp = 0
@@ -74,21 +79,18 @@ def home():
     if store.get('date')!= today:
         store = {"obs_ce":[],"obs_pe":[],"traded":[],"open":[],"day_pnl":0,"date":today,"closed":False}
 
-    # DAY CLOSE 5000
     if store['day_pnl'] >= TARGET_DAY:
         store['closed'] = True
         save(store)
         return f"<meta http-equiv='refresh' content='5'><body style='background:#000;color:gold;font-family:monospace;padding:20px'><h1>DAY CLOSED - {store['day_pnl']} Rs >= {TARGET_DAY} 🎯</h1></body>"
-
     if store.get('closed'):
         return f"<meta http-equiv='refresh' content='5'><body style='background:#000;color:#0f0;font-family:monospace'><h1>DAY CLOSED PNL {store['day_pnl']}</h1></body>"
 
-    # 1) Pratyek 3 min la OB banav
     for typ, tok in [("ce",ce_tok), ("pe",pe_tok)]:
         if tok=="0": continue
         try:
             data = obj.getCandleData({"exchange":"NFO","symboltoken":tok,"interval":"THREE_MINUTE","fromdate":f"{today} 09:15","todate":f"{today} {cur_hm}"})
-            candles = data.get('data',[]) if data else []
+            candles = data.get('data',[]) if isinstance(data,dict) else []
             for i,c in enumerate(candles):
                 h=float(c[2]); l=float(c[3]); fifty=round((h+l)/2,2)
                 risk=fifty-l
@@ -100,17 +102,13 @@ def home():
                     arr.append({"id":ob_id,"h":h,"l":l,"fifty":fifty,"tgt":tgt,"risk":round(risk,2),"broken":False,"time":str(c[0])})
         except: pass
 
-    # 2) High katla ka check - Break logic
     for ob in store['obs_ce']:
-        if not ob.get('broken') and ce_ltp > ob['h'] and ce_ltp>0:
-            ob['broken']=True
+        if not ob.get('broken') and ce_ltp > ob['h'] and ce_ltp>0: ob['broken']=True
     for ob in store['obs_pe']:
-        if not ob.get('broken') and pe_ltp > ob['h'] and pe_ltp>0:
-            ob['broken']=True
+        if not ob.get('broken') and pe_ltp > ob['h'] and pe_ltp>0: ob['broken']=True
     save(store)
 
     msg = "WAIT"
-    # 3) Open trades SL / TGT 1:2 check
     for tr in store['open'][:]:
         cur = ce_ltp if tr['sym']==ce_sym else pe_ltp
         if cur==0: continue
@@ -125,15 +123,15 @@ def home():
         store['closed']=True; save(store)
         return f"<body style='background:#000;color:gold'><h1>5000 DONE - DAY CLOSE</h1></body>"
 
-    # 4) ENTRY - High katla + 50% Retest
-    if not store['closed'] and len(store['traded']) < 30:
+    if not store['closed']:
         for ob in store['obs_ce'][-20:]:
             if ob['id'] in store['traded']: continue
-            if not ob.get('broken'): continue # High nahi katla tar nako
+            if not ob.get('broken'): continue
             if abs(ce_ltp - ob['fifty']) <= 2 and ce_ltp > ob['l'] and ce_ltp>0:
                 oid=place_buy_sl(obj, ce_sym, ce_tok, ob['l'])
-                store['traded'].append(ob['id'])
-                store['open'].append({"id":ob['id'],"sym":ce_sym,"tok":ce_tok,"buy":ce_ltp,"sl":ob['l'],"tgt":ob['tgt'],"fifty":ob['fifty']})
+                if "OK" in oid:
+                    store['traded'].append(ob['id'])
+                    store['open'].append({"id":ob['id'],"sym":ce_sym,"tok":ce_tok,"buy":ce_ltp,"sl":ob['l'],"tgt":ob['tgt'],"fifty":ob['fifty']})
                 msg=f"CE BUY {ce_ltp} | OB H:{ob['h']} Brk:True | 50%:{ob['fifty']} Retest | SL:{ob['l']} TGT:{ob['tgt']} 1:2 | {oid}"
                 break
         for ob in store['obs_pe'][-20:]:
@@ -141,8 +139,9 @@ def home():
             if not ob.get('broken'): continue
             if abs(pe_ltp - ob['fifty']) <= 2 and pe_ltp > ob['l'] and pe_ltp>0:
                 oid=place_buy_sl(obj, pe_sym, pe_tok, ob['l'])
-                store['traded'].append(ob['id'])
-                store['open'].append({"id":ob['id'],"sym":pe_sym,"tok":pe_tok,"buy":pe_ltp,"sl":ob['l'],"tgt":ob['tgt'],"fifty":ob['fifty']})
+                if "OK" in oid:
+                    store['traded'].append(ob['id'])
+                    store['open'].append({"id":ob['id'],"sym":pe_sym,"tok":pe_tok,"buy":pe_ltp,"sl":ob['l'],"tgt":ob['tgt'],"fifty":ob['fifty']})
                 msg=f"PE BUY {pe_ltp} | OB H:{ob['h']} Brk:True | 50%:{ob['fifty']} Retest | SL:{ob['l']} TGT:{ob['tgt']} 1:2 | {oid}"
                 break
 
@@ -151,7 +150,6 @@ def home():
     last_pe = store['obs_pe'][-1] if store['obs_pe'] else {"h":0,"l":0,"fifty":0,"tgt":0,"broken":False}
     broken_ce = sum(1 for x in store['obs_ce'] if x.get('broken'))
     broken_pe = sum(1 for x in store['obs_pe'] if x.get('broken'))
-
     return f"""
     <meta http-equiv='refresh' content='3'>
     <body style='background:#000;color:#0f0;font-family:monospace;padding:8px'>
@@ -159,17 +157,15 @@ def home():
     <div>CE LTP {ce_ltp} | PE LTP {pe_ltp} | QTY {QTY} | Broken CE:{broken_ce}/{len(store['obs_ce'])} PE:{broken_pe}/{len(store['obs_pe'])}</div>
     <div style='border:1px solid #0f0;padding:8px;margin-top:6px;background:#111'>ACTION: <b style='color:white'>{msg}</b><br>TRADED:{len(store['traded'])} OPEN:{len(store['open'])} DAY PNL:{store['day_pnl']}</div>
     <div style='display:flex;gap:6px;margin-top:6px'>
-        <div style='flex:1;border:1px solid #0ff;padding:6px'>LAST CE OB<br>H:{last_ce['h']} Brk:{last_ce['broken']}<br>50%:{last_ce['fifty']} L:{last_ce['l']} TGT:{last_ce['tgt']} (1:2)</div>
-        <div style='flex:1;border:1px solid #f0f;padding:6px'>LAST PE OB<br>H:{last_pe['h']} Brk:{last_pe['broken']}<br>50%:{last_pe['fifty']} L:{last_pe['l']} TGT:{last_pe['tgt']} (1:2)</div>
+        <div style='flex:1;border:1px solid #0ff;padding:6px'>LAST CE OB<br>H:{last_ce['h']} Brk:{last_ce['broken']}<br>50%:{last_ce['fifty']} L:{last_ce['l']} TGT:{last_ce['tgt']}</div>
+        <div style='flex:1;border:1px solid #f0f;padding:6px'>LAST PE OB<br>H:{last_pe['h']} Brk:{last_pe['broken']}<br>50%:{last_pe['fifty']} L:{last_pe['l']} TGT:{last_pe['tgt']}</div>
     </div>
-    <div style='color:gold;margin-top:8px'>✓ High Katla = Broken True ✓ Mag 50% Retest la ENTRY ✓ SL=OB Low ✓ TGT=1:2 RR ✓ 5000 Rs Day Close</div>
+    <div style='color:gold;margin-top:8px'>✓ FIXED ✓ High Katla=Broken True ✓ 50% Retest ENTRY ✓ SL Low ✓ TGT 1:2 ✓ 5000 Day Close</div>
     </body>
     """
-
 @app.route('/clear')
 def clear():
     if os.path.exists(FILE): os.remove(FILE)
     return "Cleared OK - 0 pasun"
-
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
