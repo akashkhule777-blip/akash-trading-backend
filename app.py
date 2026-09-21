@@ -10,7 +10,7 @@ def ist_now(): return datetime.now(timezone.utc).astimezone(IST)
 FILE = "/tmp/ob_final.json"
 QTY = 65
 
-# Render वरचे नाव - तुझ्या फोटो प्रमाणे
+# तुझ्या Render फोटो प्रमाणे नाव
 API_KEY = os.environ.get("ANGEL_API_KEY")
 CLIENT_ID = os.environ.get("ANGEL_CLIENT_ID")
 MPIN = os.environ.get("ANGEL_PASSWORD")
@@ -55,15 +55,31 @@ def run():
     try:
         smart=SmartConnect(api_key=API_KEY)
         smart.generateSession(CLIENT_ID, MPIN, pyotp.TOTP(TOTP_SECRET).now())
-    except: pass
+        print("Login OK")
+    except Exception as e:
+        print(f"Login Fail {e}")
+        return
+
     entered=False
     while True:
         try:
-            now=ist_now(); d=load(); d["time_str"]=now.strftime("%H:%M:%S")
-            ltp = smart.ltpData("NSE","NIFTY","99926000")['data']['ltp']
+            now=ist_now()
+            d=load()
+            d["time_str"]=now.strftime("%H:%M:%S")
+
+            try:
+                ltp = smart.ltpData("NSE","NIFTY","99926000")['data']['ltp']
+            except Exception as e:
+                if "exceeding" in str(e).lower():
+                    d["action"]="Rate Limit - 1 मिनिट थांबलोय..."
+                    save(d)
+                    time.sleep(60)
+                    continue
+                time.sleep(10)
+                continue
+
             atm = int(round(ltp/50)*50)
             d["nifty"]=ltp; d["atm"]=atm
-
             exp_date=get_next_tuesday()
             exp_str=exp_date.strftime("%d%b%y").upper()
             d["exp"]=str(exp_date)
@@ -71,11 +87,14 @@ def run():
             d["symbol"]=ce_sym
 
             ce_token, ce_trading = get_token(smart, ce_sym)
-            if not ce_token: d["action"]=f"Token नाही {ce_sym}"; save(d); time.sleep(2); continue
+            if not ce_token:
+                d["action"]=f"Token शोधतोय {ce_sym}"
+                save(d); time.sleep(5); continue
 
-            params={"exchange":"NFO","symboltoken":ce_token,"interval":"THREE_MINUTE","fromdate":(now-timedelta(days=1)).strftime("%Y-%m-%d %H:%M"),"todate":now.strftime("%Y-%m-%d %H:%M")}
+            params={"exchange":"NFO","symboltoken":ce_token,"interval":"THREE_MINUTE","fromdate":(now-timedelta(days=2)).strftime("%Y-%m-%d %H:%M"),"todate":now.strftime("%Y-%m-%d %H:%M")}
             candles=smart.getCandleData(params)
-            if not candles or 'data' not in candles or len(candles['data'])<10: time.sleep(2); continue
+            if not candles or 'data' not in candles or len(candles['data'])<10:
+                time.sleep(5); continue
             data_c=candles['data']
 
             ob=find_ob(data_c)
@@ -95,8 +114,19 @@ def run():
             else:
                 d["action"]=f"OB शोधतोय ATM {atm} {ce_sym} Tuesday {exp_date}"
             save(d)
-        except Exception as e: d=load(); d["action"]=f"Err {e}"; save(d)
-        time.sleep(2)
+
+        except Exception as e:
+            err_str = str(e).lower()
+            d=load()
+            if "exceeding" in err_str or "access denied" in err_str:
+                d["action"]="Rate Limit आला - 1 मिनिट थांबलोय..."
+                save(d)
+                time.sleep(60)
+            else:
+                d["action"]=f"Err {e}"
+                save(d)
+                time.sleep(5)
+        time.sleep(5)
 
 threading.Thread(target=run, daemon=True).start()
 
@@ -111,9 +141,9 @@ def home():
     <body style="background:#0e0e0e;color:white;font-family:Arial;padding:10px;">
     <h2 style="color:#00ff88;">NIFTY {d['nifty']} | ATM AUTO {d['atm']} | {d['time_str']} IST</h2>
     <p>SYMBOL AUTO: {d['symbol']} | EXP: {d['exp']}</p>
-    <p>OB {d['type']} | 50%: {d['ob_50']} | SL: {d['ob_low']} | QTY: {QTY} | 1:2</p>
+    <p>OB {d['type']} | 50%: {d['ob_50']} | SL: {d['ob_low']} | QTY: 65 | 1:2</p>
     <h3 style="color:yellow;">{d['action']}</h3>
-    <p style="color:#aaa;">Auto Refresh 3 Sec | ATM Auto</p>
+    <p style="color:#aaa;">Auto Refresh 3 Sec | ATM Auto | Rate Limit Fixed</p>
     </body></html>
     """
 
