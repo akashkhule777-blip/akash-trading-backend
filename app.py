@@ -10,10 +10,11 @@ def ist_now(): return datetime.now(timezone.utc).astimezone(IST)
 FILE = "/tmp/ob_final.json"
 QTY = 65
 
-API_KEY = "YOUR_API_KEY"
-CLIENT_ID = "YOUR_CLIENT_ID"
-MPIN = "YOUR_MPIN"
-TOTP_SECRET = "YOUR_TOTP"
+# Render वरचे नाव - तुझ्या फोटो प्रमाणे
+API_KEY = os.environ.get("ANGEL_API_KEY")
+CLIENT_ID = os.environ.get("ANGEL_CLIENT_ID")
+MPIN = os.environ.get("ANGEL_PASSWORD")
+TOTP_SECRET = os.environ.get("ANGEL_TOTP_SECRET")
 
 def load():
     if os.path.exists(FILE):
@@ -37,8 +38,7 @@ def get_token(smart, symbol):
         res = smart.searchScrip("NFO", symbol)
         if res and res.get('data'):
             return res['data'][0]['symboltoken'], res['data'][0]['tradingsymbol']
-    except Exception as e:
-        print(e)
+    except: pass
     return None, None
 
 def find_ob(candles):
@@ -55,21 +55,11 @@ def run():
     try:
         smart=SmartConnect(api_key=API_KEY)
         smart.generateSession(CLIENT_ID, MPIN, pyotp.TOTP(TOTP_SECRET).now())
-        print("Angel Login Success")
-    except Exception as e:
-        print(f"Login Fail {e}")
-
+    except: pass
     entered=False
     while True:
         try:
-            now=ist_now()
-            d=load()
-            d["time_str"]=now.strftime("%H:%M:%S")
-
-            if not ((now.hour==9 and now.minute>=15) or (9 < now.hour < 15) or (now.hour==15 and now.minute<=30)):
-                d["action"]=f"Market Closed {d['time_str']} IST"
-                save(d); time.sleep(10); continue
-
+            now=ist_now(); d=load(); d["time_str"]=now.strftime("%H:%M:%S")
             ltp = smart.ltpData("NSE","NIFTY","99926000")['data']['ltp']
             atm = int(round(ltp/50)*50)
             d["nifty"]=ltp; d["atm"]=atm
@@ -78,18 +68,14 @@ def run():
             exp_str=exp_date.strftime("%d%b%y").upper()
             d["exp"]=str(exp_date)
             ce_sym=f"NIFTY{exp_str}{atm}CE"
-            pe_sym=f"NIFTY{exp_str}{atm}PE"
             d["symbol"]=ce_sym
 
             ce_token, ce_trading = get_token(smart, ce_sym)
-            if not ce_token:
-                d["action"]=f"Token नाही मिळाला {ce_sym} EXP {exp_date}"
-                save(d); time.sleep(2); continue
+            if not ce_token: d["action"]=f"Token नाही {ce_sym}"; save(d); time.sleep(2); continue
 
             params={"exchange":"NFO","symboltoken":ce_token,"interval":"THREE_MINUTE","fromdate":(now-timedelta(days=1)).strftime("%Y-%m-%d %H:%M"),"todate":now.strftime("%Y-%m-%d %H:%M")}
             candles=smart.getCandleData(params)
-            if not candles or 'data' not in candles or len(candles['data'])<10:
-                time.sleep(2); continue
+            if not candles or 'data' not in candles or len(candles['data'])<10: time.sleep(2); continue
             data_c=candles['data']
 
             ob=find_ob(data_c)
@@ -97,33 +83,19 @@ def run():
                 d["ob_high"]=ob["high"]; d["ob_low"]=ob["low"]; d["ob_50"]=ob["50"]; d["type"]=ob["type"]
                 second_break=data_c[-1][2] > data_c[-2][2]
                 touch_50=data_c[-1][3] <= ob["50"] <= data_c[-1][2]
-
                 if second_break and touch_50:
                     sl=ob["low"]; entry=ob["50"]; tgt=entry + (entry - sl)*2
-                    d["action"]=f"REAL ENTRY {ce_trading} @ {entry:.1f} SL {sl:.1f} TGT {tgt:.1f} QTY {QTY} | 1:2 RR"
+                    d["action"]=f"REAL ENTRY {ce_trading} @ {entry:.1f} SL {sl:.1f} TGT {tgt:.1f} QTY {QTY}"
                     try:
-                        smart.placeOrder({
-                            "variety":"NORMAL",
-                            "tradingsymbol":ce_trading,
-                            "symboltoken":ce_token,
-                            "transactiontype":"BUY",
-                            "exchange":"NFO",
-                            "ordertype":"LIMIT",
-                            "price":round(entry,1),
-                            "producttype":"INTRADAY",
-                            "duration":"DAY",
-                            "quantity":str(QTY)
-                        })
+                        smart.placeOrder({"variety":"NORMAL","tradingsymbol":ce_trading,"symboltoken":ce_token,"transactiontype":"BUY","exchange":"NFO","ordertype":"LIMIT","price":round(entry,1),"producttype":"INTRADAY","duration":"DAY","quantity":str(QTY)})
                         entered=True
-                    except Exception as e:
-                        d["action"]+=f" Order Fail {e}"
+                    except Exception as e: d["action"]+=f" Fail {e}"
                 else:
-                    d["action"]=f"WAIT - ATM AUTO {atm} OB {ob['type']} 50%:{ob['50']:.1f} SL:{ob['low']:.1f} | 2ndBreak:{second_break} Touch50:{touch_50}"
+                    d["action"]=f"WAIT - ATM AUTO {atm} OB {ob['type']} 50% {ob['50']:.1f} | 2ndBreak:{second_break}"
             else:
-                d["action"]=f"OB शोधतोय ATM {atm} {ce_sym} | EXP Tuesday {exp_date}"
+                d["action"]=f"OB शोधतोय ATM {atm} {ce_sym} Tuesday {exp_date}"
             save(d)
-        except Exception as e:
-            d=load(); d["action"]=f"Error {e} {ist_now().strftime('%H:%M:%S')}"; save(d)
+        except Exception as e: d=load(); d["action"]=f"Err {e}"; save(d)
         time.sleep(2)
 
 threading.Thread(target=run, daemon=True).start()
@@ -138,11 +110,10 @@ def home():
     </head>
     <body style="background:#0e0e0e;color:white;font-family:Arial;padding:10px;">
     <h2 style="color:#00ff88;">NIFTY {d['nifty']} | ATM AUTO {d['atm']} | {d['time_str']} IST</h2>
-    <p>SYMBOL: {d['symbol']} | EXPIRY: {d['exp']} Tuesday Auto</p>
-    <p>OB TYPE: {d['type']} | HIGH: {d['ob_high']} LOW: {d['ob_low']} 50%: {d['ob_50']}</p>
-    <p>QTY: {QTY} | SL: OB Low | RR: 1:2</p>
-    <h3 style="color:yellow;">ACTION: {d['action']}</h3>
-    <p style="color:#aaa;font-size:12px;">Auto Refresh 3 Sec | ATM Auto Select | Option 3min OB Setup</p>
+    <p>SYMBOL AUTO: {d['symbol']} | EXP: {d['exp']}</p>
+    <p>OB {d['type']} | 50%: {d['ob_50']} | SL: {d['ob_low']} | QTY: {QTY} | 1:2</p>
+    <h3 style="color:yellow;">{d['action']}</h3>
+    <p style="color:#aaa;">Auto Refresh 3 Sec | ATM Auto</p>
     </body></html>
     """
 
