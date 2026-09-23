@@ -7,6 +7,7 @@ app = Flask(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
 def ist_now(): return datetime.now(timezone.utc).astimezone(IST)
 FILE = "/tmp/ob.json"
+QTY = 75 # NIFTY LOT
 
 def load():
     if os.path.exists(FILE):
@@ -23,31 +24,34 @@ def get_tue():
     if off == 0 and ist_now().hour >= 15: off = 7
     return d + timedelta(days=off)
 
-def find_option_ob(c):
-    try:
-        if not c or len(c) < 20: return None
-        # Option cha box - shevatche 15 candle
-        # Tuzya photo madhe jasa box kadhlas tasa
-        box = c[-16:-2] # last 2 sodun
-        h = max(float(x[2]) for x in box)
-        l = min(float(x[3]) for x in box)
-        return {"high":h,"low":l,"50":(h+l)/2.0}
-    except: return None
+def find_ob(c):
+    if not c or len(c) < 20: return None
+    box = c[-16:-2]
+    h = max(float(x[2]) for x in box)
+    l = min(float(x[3]) for x in box)
+    return {"high":h,"low":l,"50":(h+l)/2.0}
 
 def get_candles(smart, token):
-    # 3 interval try karu - ek na ek la data yeil
-    for interval in ["THREE_MINUTE","FIVE_MINUTE","ONE_MINUTE"]:
-        try:
-            frm = (ist_now() - timedelta(days=6)).strftime("%Y-%m-%d %H:%M")
-            to = ist_now().strftime("%Y-%m-%d %H:%M")
-            res = smart.getCandleData({"exchange":"NFO","symboltoken":token,"interval":interval,"fromdate":frm,"todate":to})
-            if isinstance(res, dict):
-                data = res.get('data')
-                if isinstance(data, list) and len(data) > 15:
-                    return data, interval
-        except: pass
-        time.sleep(1)
-    return [], "NO DATA"
+    try:
+        frm = (ist_now() - timedelta(days=6)).strftime("%Y-%m-%d %H:%M")
+        to = ist_now().strftime("%Y-%m-%d %H:%M")
+        res = smart.getCandleData({"exchange":"NFO","symboltoken":str(token),"interval":"THREE_MINUTE","fromdate":frm,"todate":to})
+        if isinstance(res, dict):
+            data = res.get('data')
+            if isinstance(data, list) and len(data) > 15:
+                return data
+    except: pass
+    return []
+
+def parse_search(res):
+    try:
+        if isinstance(res, str): res = json.loads(res)
+        if isinstance(res, dict):
+            d = res.get('data')
+            if isinstance(d, list) and len(d)>0:
+                return d[0]
+    except: pass
+    return None
 
 def run():
     try:
@@ -57,91 +61,66 @@ def run():
         d=load(); d["action"]=f"LOGIN FAIL {e}"; save(d); return
 
     ce_tok=pe_tok=ce_trad=pe_trad=None; last_exp=None
-    ce_entry_done=False; pe_entry_done=False
+    ce_done=False; pe_done=False
 
     while True:
         try:
             now=ist_now(); d=load(); exp=get_tue()
             ltp = smart.ltpData("NSE","NIFTY","26000")['data']['ltp']
             atm = int(round(ltp/50)*50)
-            d["nifty"]=ltp; d["atm"]=atm; d["exp"]=str(exp)
-            d["time_str"]=now.strftime("%H:%M:%S")
+            d["nifty"]=ltp; d["atm"]=atm; d["exp"]=str(exp); d["time_str"]=now.strftime("%H:%M:%S")
 
             if last_exp!=exp or not ce_tok:
-                ce_sym = f"NIFTY{exp.strftime('%d%b%y').upper()}{atm}CE"
-                pe_sym = f"NIFTY{exp.strftime('%d%b%y').upper()}{atm}PE"
                 try:
-                    s1 = smart.searchScrip("NFO", ce_sym)
+                    r1 = smart.searchScrip("NFO", f"NIFTY{exp.strftime('%d%b%y').upper()}{atm}CE")
                     time.sleep(1)
-                    s2 = smart.searchScrip("NFO", pe_sym)
-                    if s1 and s1.get('data'): ce_tok=str(s1['data'][0]['symboltoken']); ce_trad=s1['data'][0]['tradingsymbol']; d["ce_sym"]=ce_trad
-                    if s2 and s2.get('data'): pe_tok=str(s2['data'][0]['symboltoken']); pe_trad=s2['data'][0]['tradingsymbol']; d["pe_sym"]=pe_trad
-                    last_exp=exp; ce_entry_done=False; pe_entry_done=False
+                    r2 = smart.searchScrip("NFO", f"NIFTY{exp.strftime('%d%b%y').upper()}{atm}PE")
+                    p1 = parse_search(r1); p2 = parse_search(r2)
+                    if p1: ce_tok=str(p1['symboltoken']); ce_trad=p1['tradingsymbol']; d["ce_sym"]=ce_trad
+                    if p2: pe_tok=str(p2['symboltoken']); pe_trad=p2['tradingsymbol']; d["pe_sym"]=pe_trad
+                    last_exp=exp; ce_done=False; pe_done=False
                 except Exception as e:
                     if "Access denied" in str(e): time.sleep(600); continue
                     time.sleep(60); continue
 
-            if not ce_tok: time.sleep(60); continue
+            ce_data = get_candles(smart, ce_tok); time.sleep(2)
+            pe_data = get_candles(smart, pe_tok)
 
-            ce_data, ce_int = get_candles(smart, ce_tok)
-            time.sleep(2)
-            pe_data, pe_int = get_candles(smart, pe_tok)
+            ce_ob = find_ob(ce_data); pe_ob = find_ob(pe_data)
+            d["log"]=f"CE {len(ce_data)} | PE {len(pe_data)}"
 
-            d["log"]=f"CE {len(ce_data)} {ce_int} | PE {len(pe_data)} {pe_int}"
+            if ce_ob: d["ce_h"]=round(ce_ob["high"],2); d["ce_l"]=round(ce_ob["low"],2); d["ce_50"]=round(ce_ob["50"],2); d["ce_sl"]=round(ce_ob["low"],2)
+            if pe_ob: d["pe_h"]=round(pe_ob["high"],2); d["pe_l"]=round(pe_ob["low"],2); d["pe_50"]=round(pe_ob["50"],2); d["pe_sl"]=round(pe_ob["low"],2)
 
-            ce_ob = find_option_ob(ce_data)
-            pe_ob = find_option_ob(pe_data)
-
-            if ce_ob:
-                d["ce_h"]=round(ce_ob["high"],2); d["ce_l"]=round(ce_ob["low"],2)
-                d["ce_50"]=round(ce_ob["50"],2); d["ce_sl"]=round(ce_ob["low"],2)
-            if pe_ob:
-                d["pe_h"]=round(pe_ob["high"],2); d["pe_l"]=round(pe_ob["low"],2)
-                d["pe_50"]=round(pe_ob["50"],2); d["pe_sl"]=round(pe_ob["low"],2)
-
-            msg=[]
-            # CE OPTION BREAK LOGIC
-            if ce_ob and len(ce_data)>2:
-                last_candle_high = float(ce_data[-2][2])
-                if last_candle_high > ce_ob["high"] and not ce_entry_done:
-                    lp = int(ce_ob["50"])
+            msgs=[]
+            if ce_ob and not ce_done and len(ce_data)>2:
+                if float(ce_data[-1][4]) > ce_ob["high"]:
                     try:
-                        smart.placeOrder({"variety":"NORMAL","tradingsymbol":ce_trad,"symboltoken":ce_tok,"transactiontype":"BUY","exchange":"NFO","ordertype":"LIMIT","price":lp,"producttype":"INTRADAY","duration":"DAY","quantity":65})
-                        msg.append(f"CE BREAK BUY 50% {lp}")
-                        ce_entry_done=True
-                    except Exception as e: msg.append(f"CE Fail {e}")
-                else:
-                    msg.append(f"CE BOX {d['ce_l']}-{d['ce_h']} 50% {d['ce_50']}")
+                        # FIX: price float, quantity 75
+                        order = smart.placeOrder({"variety":"NORMAL","tradingsymbol":ce_trad,"symboltoken":ce_tok,"transactiontype":"BUY","exchange":"NFO","ordertype":"LIMIT","price":float(d["ce_50"]),"producttype":"INTRADAY","duration":"DAY","quantity":QTY})
+                        msgs.append(f"CE BUY {d['ce_50']} ORDER OK"); ce_done=True
+                    except Exception as e: msgs.append(f"CE {e}")
+                else: msgs.append(f"CE BOX {d['ce_l']}-{d['ce_h']} 50% {d['ce_50']}")
 
-            if pe_ob and len(pe_data)>2:
-                last_candle_high = float(pe_data[-2][2])
-                if last_candle_high > pe_ob["high"] and not pe_entry_done:
-                    lp = int(pe_ob["50"])
+            if pe_ob and not pe_done and len(pe_data)>2:
+                if float(pe_data[-1][4]) > pe_ob["high"]:
                     try:
-                        smart.placeOrder({"variety":"NORMAL","tradingsymbol":pe_trad,"symboltoken":pe_tok,"transactiontype":"BUY","exchange":"NFO","ordertype":"LIMIT","price":lp,"producttype":"INTRADAY","duration":"DAY","quantity":65})
-                        msg.append(f"PE BREAK BUY 50% {lp}")
-                        pe_entry_done=True
-                    except Exception as e: msg.append(f"PE Fail {e}")
-                else:
-                    msg.append(f"PE BOX {d['pe_l']}-{d['pe_h']} 50% {d['pe_50']}")
+                        order = smart.placeOrder({"variety":"NORMAL","tradingsymbol":pe_trad,"symboltoken":pe_tok,"transactiontype":"BUY","exchange":"NFO","ordertype":"LIMIT","price":float(d["pe_50"]),"producttype":"INTRADAY","duration":"DAY","quantity":QTY})
+                        msgs.append(f"PE BUY {d['pe_50']} ORDER OK"); pe_done=True
+                    except Exception as e: msgs.append(f"PE {e}")
+                else: msgs.append(f"PE BOX {d['pe_l']}-{d['pe_h']} 50% {d['pe_50']}")
 
-            if not msg:
-                d["action"]=f"Candle wait {d['log']}"
-            else:
-                d["action"]=" | ".join(msg)
-
-            save(d)
-            time.sleep(180)
-
+            d["action"]=" | ".join(msgs) if msgs else f"Wait Break | {d['log']}"
+            save(d); time.sleep(180)
         except Exception as e:
-            d=load(); d["action"]=f"Err {e}"; save(d); time.sleep(120)
+            d=load(); d["action"]=f"Loop {e}"; save(d); time.sleep(120)
 
 threading.Thread(target=run, daemon=True).start()
 
 @app.route('/')
 def home():
     d=load()
-    return f"<html><head><meta http-equiv='refresh' content='15'><meta name='viewport' content='width=device-width'><style>body{{background:#111;color:#fff;font-family:Arial;padding:10px}}.g{{color:#0f0;font-size:20px}}.y{{color:#ffeb3b;font-size:13px}}.b{{border:1px solid #444;padding:8px;border-radius:8px;margin:6px 0;background:#1a1a1a}}</style></head><body><h2 class=g>NIFTY {d['nifty']} ATM {d['atm']}</h2><div class=b>CE: {d['ce_sym']}<br>BOX {d['ce_l']} - {d['ce_h']}<br><b>50% {d['ce_50']} SL {d['ce_sl']}</b></div><div class=b>PE: {d['pe_sym']}<br>BOX {d['pe_l']} - {d['pe_h']}<br><b>50% {d['pe_50']} SL {d['pe_sl']}</b></div><div class=b>EXP {d['exp']}<br>{d['log']}</div><h3 class=y>{d['action']}</h3><p>{d['time_str']} | OPTION CHART ONLY</p></body></html>"
+    return f"<html><head><meta http-equiv='refresh' content='15'><meta name='viewport' content='width=device-width'><style>body{{background:#111;color:#fff;font-family:Arial;padding:10px}}.g{{color:#0f0;font-size:20px}}.y{{color:#ffeb3b;font-size:13px}}.b{{border:1px solid #444;padding:8px;border-radius:8px;margin:6px 0;background:#1a1a1a}}</style></head><body><h2 class=g>NIFTY {d['nifty']} ATM {d['atm']}</h2><div class=b>CE: {d['ce_sym']}<br>BOX {d['ce_l']} - {d['ce_h']}<br><b>50% {d['ce_50']} SL {d['ce_sl']}</b></div><div class=b>PE: {d['pe_sym']}<br>BOX {d['pe_l']} - {d['pe_h']}<br><b>50% {d['pe_50']} SL {d['pe_sl']}</b></div><div class=b>EXP {d['exp']}<br>{d['log']}</div><h3 class=y>{d['action']}</h3><p>{d['time_str']} | OPTION ONLY FINAL</p></body></html>"
 
 if __name__=='__main__':
     app.run(host='0.0.0.0', port=10000)
