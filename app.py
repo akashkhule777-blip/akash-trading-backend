@@ -7,7 +7,7 @@ app = Flask(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
 def ist_now(): return datetime.now(timezone.utc).astimezone(IST)
 FILE = "/tmp/ob.json"
-QTY = 75 # NIFTY LOT
+QTY = 65
 
 def load():
     if os.path.exists(FILE):
@@ -87,7 +87,7 @@ def run():
             pe_data = get_candles(smart, pe_tok)
 
             ce_ob = find_ob(ce_data); pe_ob = find_ob(pe_data)
-            d["log"]=f"CE {len(ce_data)} | PE {len(pe_data)}"
+            d["log"]=f"CE {len(ce_data)} | PE {len(pe_data)} | QTY {QTY}"
 
             if ce_ob: d["ce_h"]=round(ce_ob["high"],2); d["ce_l"]=round(ce_ob["low"],2); d["ce_50"]=round(ce_ob["50"],2); d["ce_sl"]=round(ce_ob["low"],2)
             if pe_ob: d["pe_h"]=round(pe_ob["high"],2); d["pe_l"]=round(pe_ob["low"],2); d["pe_50"]=round(pe_ob["50"],2); d["pe_sl"]=round(pe_ob["low"],2)
@@ -96,17 +96,15 @@ def run():
             if ce_ob and not ce_done and len(ce_data)>2:
                 if float(ce_data[-1][4]) > ce_ob["high"]:
                     try:
-                        # FIX: price float, quantity 75
-                        order = smart.placeOrder({"variety":"NORMAL","tradingsymbol":ce_trad,"symboltoken":ce_tok,"transactiontype":"BUY","exchange":"NFO","ordertype":"LIMIT","price":float(d["ce_50"]),"producttype":"INTRADAY","duration":"DAY","quantity":QTY})
-                        msgs.append(f"CE BUY {d['ce_50']} ORDER OK"); ce_done=True
+                        smart.placeOrder({"variety":"NORMAL","tradingsymbol":ce_trad,"symboltoken":ce_tok,"transactiontype":"BUY","exchange":"NFO","ordertype":"LIMIT","price":float(d["ce_50"]),"producttype":"INTRADAY","duration":"DAY","quantity":QTY})
+                        msgs.append(f"CE BUY {d['ce_50']} x{QTY} OK"); ce_done=True
                     except Exception as e: msgs.append(f"CE {e}")
                 else: msgs.append(f"CE BOX {d['ce_l']}-{d['ce_h']} 50% {d['ce_50']}")
-
             if pe_ob and not pe_done and len(pe_data)>2:
                 if float(pe_data[-1][4]) > pe_ob["high"]:
                     try:
-                        order = smart.placeOrder({"variety":"NORMAL","tradingsymbol":pe_trad,"symboltoken":pe_tok,"transactiontype":"BUY","exchange":"NFO","ordertype":"LIMIT","price":float(d["pe_50"]),"producttype":"INTRADAY","duration":"DAY","quantity":QTY})
-                        msgs.append(f"PE BUY {d['pe_50']} ORDER OK"); pe_done=True
+                        smart.placeOrder({"variety":"NORMAL","tradingsymbol":pe_trad,"symboltoken":pe_tok,"transactiontype":"BUY","exchange":"NFO","ordertype":"LIMIT","price":float(d["pe_50"]),"producttype":"INTRADAY","duration":"DAY","quantity":QTY})
+                        msgs.append(f"PE BUY {d['pe_50']} x{QTY} OK"); pe_done=True
                     except Exception as e: msgs.append(f"PE {e}")
                 else: msgs.append(f"PE BOX {d['pe_l']}-{d['pe_h']} 50% {d['pe_50']}")
 
@@ -120,7 +118,7 @@ threading.Thread(target=run, daemon=True).start()
 @app.route('/')
 def home():
     d=load()
-    return f"<html><head><meta http-equiv='refresh' content='15'><meta name='viewport' content='width=device-width'><style>body{{background:#111;color:#fff;font-family:Arial;padding:10px}}.g{{color:#0f0;font-size:20px}}.y{{color:#ffeb3b;font-size:13px}}.b{{border:1px solid #444;padding:8px;border-radius:8px;margin:6px 0;background:#1a1a1a}}</style></head><body><h2 class=g>NIFTY {d['nifty']} ATM {d['atm']}</h2><div class=b>CE: {d['ce_sym']}<br>BOX {d['ce_l']} - {d['ce_h']}<br><b>50% {d['ce_50']} SL {d['ce_sl']}</b></div><div class=b>PE: {d['pe_sym']}<br>BOX {d['pe_l']} - {d['pe_h']}<br><b>50% {d['pe_50']} SL {d['pe_sl']}</b></div><div class=b>EXP {d['exp']}<br>{d['log']}</div><h3 class=y>{d['action']}</h3><p>{d['time_str']} | OPTION ONLY FINAL</p></body></html>"
+    return f"<html><head><meta http-equiv='refresh' content='15'><meta name='viewport' content='width=device-width'><style>body{{background:#111;color:#fff;font-family:Arial;padding:10px}}.g{{color:#0f0;font-size:20px}}.y{{color:#ffeb3b;font-size:13px}}.b{{border:1px solid #444;padding:8px;border-radius:8px;margin:6px 0;background:#1a1a1a}}</style></head><body><h2 class=g>NIFTY {d['nifty']} ATM {d['atm']}</h2><div class=b>CE: {d['ce_sym']}<br>BOX {d['ce_l']} - {d['ce_h']}<br><b>50% {d['ce_50']} SL {d['ce_sl']}</b></div><div class=b>PE: {d['pe_sym']}<br>BOX {d['pe_l']} - {d['pe_h']}<br><b>50% {d['pe_50']} SL {d['pe_sl']}</b></div><div class=b>EXP {d['exp']}<br>{d['log']}</div><h3 class=y>{d['action']}</h3><p>{d['time_str']} | 65 QTY FINAL</p></body></html>"
 
 if __name__=='__main__':
     app.run(host='0.0.0.0', port=10000)
